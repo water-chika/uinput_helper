@@ -41,7 +41,7 @@ int main(void) {
     ioctl(fd, UI_SET_ABSBIT, ABS_X);
     ioctl(fd, UI_SET_ABSBIT, ABS_Y);
 
-    struct uinput_abs_setup abs_x{
+    struct uinput_abs_setup abs_x = {
         .code = ABS_X,
         .absinfo = {
             .minimum = -512,
@@ -50,7 +50,7 @@ int main(void) {
         },
     };
     ioctl(fd, UI_ABS_SETUP, &abs_x);
-    struct uinput_abs_setup abs_y{
+    struct uinput_abs_setup abs_y = {
         .code = ABS_Y,
         .absinfo = {
             .minimum = -512,
