@@ -86,13 +86,10 @@ int main(void) {
         else if (strcmp(str, "b") == 0) {
             emit(fd, EV_KEY, BTN_B, value);
         }
-        else if (strcmp(str, "z") == 0) {
-        }
         else {
-            printf("not known key\n");
+            printf("not known key: %s\n", str);
         }
         emit(fd, EV_SYN, SYN_REPORT, 0);
-        printf("syn\n");
     }
 
     ioctl(fd, UI_DEV_DESTROY);
