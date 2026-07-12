@@ -24,7 +24,6 @@ int main(void) {
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
 
     ioctl(fd, UI_SET_EVBIT, EV_KEY);
-    //ioctl(fd, UI_SET_EVBIT, EV_ABS);
 
     ioctl(fd, UI_SET_KEYBIT, BTN_A);
     ioctl(fd, UI_SET_KEYBIT, BTN_B);
@@ -37,27 +36,29 @@ int main(void) {
     //ioctl(fd, UI_SET_KEYBIT, BTN_START);
     //ioctl(fd, UI_SET_KEYBIT, BTN_SELECT);
 
-    //ioctl(fd, UI_SET_ABSBIT, ABS_X);
-    //ioctl(fd, UI_SET_ABSBIT, ABS_Y);
+    ioctl(fd, UI_SET_EVBIT, EV_ABS);
+
+    ioctl(fd, UI_SET_ABSBIT, ABS_X);
+    ioctl(fd, UI_SET_ABSBIT, ABS_Y);
 
     struct uinput_abs_setup abs_x{
         .code = ABS_X,
         .absinfo = {
             .minimum = -512,
-            .maximum = 511,
-            .flat = 4,
+            .maximum = 512,
+            .flat = 30,
         },
     };
-    //ioctl(fd, UI_ABS_SETUP, &abs_x);
+    ioctl(fd, UI_ABS_SETUP, &abs_x);
     struct uinput_abs_setup abs_y{
         .code = ABS_Y,
         .absinfo = {
             .minimum = -512,
-            .maximum = 511,
-            .flat = 4,
+            .maximum = 512,
+            .flat = 30,
         },
     };
-    //ioctl(fd, UI_ABS_SETUP, &abs_y);
+    ioctl(fd, UI_ABS_SETUP, &abs_y);
 
     memset(&usetup, 0, sizeof(usetup));
     usetup.id.bustype = BUS_USB;
@@ -69,19 +70,31 @@ int main(void) {
     ioctl(fd, UI_DEV_SETUP, &usetup);
     ioctl(fd, UI_DEV_CREATE);
 
-    sleep(1);
-
-    int x = 0, y = 500;
     while (true) {
-        //emit(fd, EV_ABS, ABS_X, x);
-        //emit(fd, EV_ABS, ABS_Y, y);
-        //emit(fd, EV_SYN, SYN_REPORT, 0);
-        printf("sleep\n");
-        sleep(1);
-        y = -y;
+        char str[1024];
+        int value;
+        scanf("%s %d", str, &value);
+        if (strcmp(str, "x") == 0) {
+            emit(fd, EV_ABS, ABS_X, value);
+        }
+        else if (strcmp(str, "y") == 0) {
+            emit(fd, EV_ABS, ABS_Y, value);
+        }
+        else if (strcmp(str, "a") == 0) {
+            emit(fd, EV_KEY, BTN_A, value);
+        }
+        else if (strcmp(str, "b") == 0) {
+            emit(fd, EV_KEY, BTN_B, value);
+        }
+        else if (strcmp(str, "z") == 0) {
+        }
+        else {
+            printf("not known key\n");
+        }
+        emit(fd, EV_SYN, SYN_REPORT, 0);
+        printf("syn\n");
     }
 
-    sleep(1);
     ioctl(fd, UI_DEV_DESTROY);
     close(fd);
 
