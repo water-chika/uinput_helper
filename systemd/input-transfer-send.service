@@ -6,7 +6,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/default/input-transfer-send
-ExecStart=/usr/local/bin/input_transfer send ${INPUT_DEVICE} ${REMOTE_HOST} ${REMOTE_PORT}
+# INPUT_DEVICES is unquoted so the shell splits it into multiple -d
+# arguments, e.g. INPUT_DEVICES="-d /dev/input/event3 -d /dev/input/event4"
+ExecStart=/bin/sh -c '/usr/local/bin/input_transfer send $INPUT_DEVICES ${REMOTE_HOST} ${REMOTE_PORT}'
 Restart=on-failure
 RestartSec=2
 

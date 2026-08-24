@@ -7,8 +7,10 @@
 #include <linux/uinput.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -58,6 +60,26 @@ static inline int input_net_bit_is_set(const uint8_t *bits, int bit) {
 static inline void input_net_set_bit(uint8_t *bits, int bit) {
     bits[bit / 8] |= (uint8_t)(1u << (bit % 8));
 }
+
+/* Sent once right after connect: how many devices follow, then that many
+ * struct input_net_device_info records (one per shared device, in the
+ * same order events will be tagged with below). */
+struct input_net_stream_header {
+    uint32_t magic;
+    uint32_t device_count;
+};
+
+/* Every event on the wire after the header/device-info records is
+ * prefixed with the (0-based) index of the device it belongs to (into
+ * the device_count devices announced above), so a single TCP connection
+ * can multiplex events from any number of devices. */
+struct input_net_tagged_event {
+    uint32_t device_index;
+    struct input_event ev;
+};
+
+#define INPUT_NET_MAX_DEVICES 32
+
 
 /* Reads exactly len bytes, retrying on EINTR/short reads.
  * Returns len on success, 0 on clean EOF before any byte, -1 on error. */
@@ -196,67 +218,141 @@ static inline int input_net_create_uinput_device(const struct input_net_device_i
     return uinput_fd;
 }
 
-/* Sends dev_fd's capabilities to sock_fd, then forwards every event read
- * from dev_fd to sock_fd until dev_fd fails to read or sock_fd fails to
- * write (peer disconnected). Intended for whichever side owns/opened the
- * real (or virtual) input device being shared, regardless of whether that
- * side is the TCP listener or the connector. */
-static inline void input_net_send_device(int dev_fd, int sock_fd) {
-    struct input_net_device_info info;
-    input_net_fill_device_info(dev_fd, &info);
-
-    if (input_net_write_full(sock_fd, &info, sizeof(info)) != (ssize_t)sizeof(info)) {
-        perror("send device info");
+/* Sends the capabilities of dev_fds[0..dev_count-1] to sock_fd (stream
+ * header + one input_net_device_info per device), then multiplexes
+ * events read from any of them (via poll()) to sock_fd, each tagged with
+ * its device's index, until every device fd errors/closes or sock_fd
+ * fails to write (peer disconnected). Intended for whichever side
+ * owns/opens the real (or virtual) input devices being shared,
+ * regardless of whether that side is the TCP listener or the connector. */
+static inline void input_net_send_devices(const int *dev_fds, int dev_count, int sock_fd) {
+    if (dev_count <= 0 || dev_count > INPUT_NET_MAX_DEVICES) {
+        fprintf(stderr, "invalid device count %d\n", dev_count);
         return;
     }
-    printf("Sent device info: %s\n", info.name);
 
-    struct input_event ev;
-    for (;;) {
-        ssize_t n = read(dev_fd, &ev, sizeof(ev));
-        if (n < 0) {
-            perror("read input device");
+    struct input_net_stream_header header;
+    header.magic = INPUT_NET_MAGIC;
+    header.device_count = (uint32_t)dev_count;
+    if (input_net_write_full(sock_fd, &header, sizeof(header)) != (ssize_t)sizeof(header)) {
+        perror("send stream header");
+        return;
+    }
+
+    for (int i = 0; i < dev_count; i++) {
+        struct input_net_device_info info;
+        input_net_fill_device_info(dev_fds[i], &info);
+        if (input_net_write_full(sock_fd, &info, sizeof(info)) != (ssize_t)sizeof(info)) {
+            perror("send device info");
+            return;
+        }
+        printf("Sent device info [%d]: %s\n", i, info.name);
+    }
+
+    struct pollfd pfds[INPUT_NET_MAX_DEVICES];
+    for (int i = 0; i < dev_count; i++) {
+        pfds[i].fd = dev_fds[i];
+        pfds[i].events = POLLIN;
+    }
+
+    int active = dev_count;
+    while (active > 0) {
+        int ready = poll(pfds, (nfds_t)dev_count, -1);
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("poll");
             break;
         }
-        if (n != (ssize_t)sizeof(ev)) {
-            fprintf(stderr, "short read from input device (%zd bytes)\n", n);
-            break;
+
+        int stop = 0;
+        for (int i = 0; i < dev_count && !stop; i++) {
+            if (pfds[i].fd < 0 || !(pfds[i].revents & (POLLIN | POLLERR | POLLHUP))) {
+                continue;
+            }
+
+            struct input_net_tagged_event tagged;
+            tagged.device_index = (uint32_t)i;
+            ssize_t n = read(pfds[i].fd, &tagged.ev, sizeof(tagged.ev));
+            if (n != (ssize_t)sizeof(tagged.ev)) {
+                if (n < 0) {
+                    perror("read input device");
+                } else {
+                    fprintf(stderr, "device [%d] closed/short read\n", i);
+                }
+                pfds[i].fd = -1;
+                active--;
+                continue;
+            }
+            if (input_net_write_full(sock_fd, &tagged, sizeof(tagged)) != (ssize_t)sizeof(tagged)) {
+                fprintf(stderr, "peer disconnected\n");
+                stop = 1;
+            }
         }
-        if (input_net_write_full(sock_fd, &ev, sizeof(ev)) != (ssize_t)sizeof(ev)) {
-            fprintf(stderr, "peer disconnected\n");
+        if (stop) {
             break;
         }
     }
 }
 
-/* Receives device capabilities from sock_fd, recreates a matching virtual
- * device via uinput, and forwards every received event onto it until the
- * peer disconnects or an error occurs. Intended for whichever side wants
- * to receive/recreate the device, regardless of whether that side is the
- * TCP listener or the connector.
+/* Convenience wrapper for a single device. */
+static inline void input_net_send_device(int dev_fd, int sock_fd) {
+    input_net_send_devices(&dev_fd, 1, sock_fd);
+}
+
+/* Receives the stream header and each device's capabilities from
+ * sock_fd, recreates a matching virtual device via uinput for each, and
+ * forwards every received (tagged) event onto the matching device until
+ * the peer disconnects or an error occurs. Intended for whichever side
+ * wants to receive/recreate the devices, regardless of whether that side
+ * is the TCP listener or the connector.
  * Returns 0 on a clean disconnect, -1 on error (including failure to
- * receive/parse the device info or create the uinput device). */
-static inline int input_net_receive_device(int sock_fd) {
-    struct input_net_device_info info;
-    ssize_t n = input_net_read_full(sock_fd, &info, sizeof(info));
-    if (n != (ssize_t)sizeof(info)) {
-        fprintf(stderr, "failed to receive device info from peer\n");
+ * receive/parse the stream header/device info or create a uinput
+ * device). */
+static inline int input_net_receive_devices(int sock_fd) {
+    struct input_net_stream_header header;
+    ssize_t n = input_net_read_full(sock_fd, &header, sizeof(header));
+    if (n != (ssize_t)sizeof(header)) {
+        fprintf(stderr, "failed to receive stream header from peer\n");
         return -1;
     }
-    if (info.magic != INPUT_NET_MAGIC) {
-        fprintf(stderr, "bad protocol magic from peer (got 0x%08x)\n", info.magic);
+    if (header.magic != INPUT_NET_MAGIC) {
+        fprintf(stderr, "bad protocol magic from peer (got 0x%08x)\n", header.magic);
         return -1;
     }
-    info.name[sizeof(info.name) - 1] = '\0';
+    if (header.device_count == 0 || header.device_count > INPUT_NET_MAX_DEVICES) {
+        fprintf(stderr, "peer announced invalid device count %u\n",
+                (unsigned)header.device_count);
+        return -1;
+    }
 
-    int uinput_fd = input_net_create_uinput_device(&info);
-    if (uinput_fd < 0) {
-        return -1;
+    int uinput_fds[INPUT_NET_MAX_DEVICES];
+    int dev_count = (int)header.device_count;
+    int rc = 0;
+
+    for (int i = 0; i < dev_count; i++) {
+        struct input_net_device_info info;
+        ssize_t r = input_net_read_full(sock_fd, &info, sizeof(info));
+        if (r != (ssize_t)sizeof(info)) {
+            fprintf(stderr, "failed to receive device info [%d] from peer\n", i);
+            dev_count = i;
+            rc = -1;
+            goto cleanup;
+        }
+        info.name[sizeof(info.name) - 1] = '\0';
+
+        uinput_fds[i] = input_net_create_uinput_device(&info);
+        if (uinput_fds[i] < 0) {
+            dev_count = i;
+            rc = -1;
+            goto cleanup;
+        }
     }
 
-    struct input_event ev;
     for (;;) {
-        ssize_t r = input_net_read_full(sock_fd, &ev, sizeof(ev));
+        struct input_net_tagged_event tagged;
+        ssize_t r = input_net_read_full(sock_fd, &tagged, sizeof(tagged));
         if (r == 0) {
             fprintf(stderr, "peer closed connection\n");
             break;
@@ -265,15 +361,27 @@ static inline int input_net_receive_device(int sock_fd) {
             perror("read from peer");
             break;
         }
-        if (write(uinput_fd, &ev, sizeof(ev)) < 0) {
+        if (tagged.device_index >= (uint32_t)dev_count) {
+            fprintf(stderr, "bad device index %u from peer\n", (unsigned)tagged.device_index);
+            break;
+        }
+        if (write(uinput_fds[tagged.device_index], &tagged.ev, sizeof(tagged.ev)) < 0) {
             perror("write uinput");
             break;
         }
     }
 
-    ioctl(uinput_fd, UI_DEV_DESTROY);
-    close(uinput_fd);
-    return 0;
+cleanup:
+    for (int i = 0; i < dev_count; i++) {
+        ioctl(uinput_fds[i], UI_DEV_DESTROY);
+        close(uinput_fds[i]);
+    }
+    return rc;
+}
+
+/* Convenience wrapper matching the old single-device receive API. */
+static inline int input_net_receive_device(int sock_fd) {
+    return input_net_receive_devices(sock_fd);
 }
 
 /* Resolves host (hostname or numeric IPv4/IPv6 address) and port via

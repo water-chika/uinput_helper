@@ -8,47 +8,54 @@ Interactively creates a virtual joystick device via `/dev/uinput` and lets
 you drive its axes/buttons from stdin (`x <value>`, `y <value>`,
 `a <0|1>`, `b <0|1>`).
 
-## Transferring an input device over the network
+## Transferring input devices over the network
 
-`input_transfer` lets you take a real input device (mouse, keyboard,
-joystick, etc.) attached to one machine and make it appear as a virtual
-device on another machine, over a plain TCP connection. Either side can
-send or receive, and either side can be the one that listens for a
-connection vs. the one that connects out — pick whichever combination
-suits your network (e.g. the side without a routable/open port should
-usually be the one that connects out).
+`input_transfer` lets you take one or more real input devices (mouse,
+keyboard, joystick, etc.) attached to one machine and make them appear
+as virtual devices on another machine, over a single plain TCP
+connection. Either side can send or receive, and either side can be the
+one that listens for a connection vs. the one that connects out — pick
+whichever combination suits your network (e.g. the side without a
+routable/open port should usually be the one that connects out).
 
-- **send** opens a real evdev device (e.g. `/dev/input/eventX`), grabs
-  it exclusively so events stop being delivered locally (`EVIOCGRAB`,
-  best-effort), reads its capabilities (event/key/rel/abs bits and abs
-  axis info), and sends them once to the peer, followed by every
-  `input_event` read from the device.
+- **send** opens each `-d <input-device>` given (e.g. `/dev/input/eventX`),
+  grabs it exclusively so events stop being delivered locally
+  (`EVIOCGRAB`, best-effort), reads its capabilities (event/key/rel/abs
+  bits and abs axis info), and sends a stream header plus every
+  device's capabilities once to the peer, followed by a multiplexed
+  stream of `input_event`s read from all the devices (each tagged with
+  which device it came from) via `poll()`.
 
-- **receive** waits for a peer's device capabilities, creates a
-  matching virtual device via `/dev/uinput` (same event/key/rel/abs
-  bits and abs axis ranges), and replays every event received onto
-  that virtual device.
+- **receive** waits for the peer's stream header and each device's
+  capabilities, creates one matching virtual device per announced
+  device via `/dev/uinput` (same event/key/rel/abs bits and abs axis
+  ranges), and replays every received event onto the matching virtual
+  device.
 
 ### Usage
 
 ```sh
-input_transfer send <input-device> --listen [port]   # share a device, waiting for a peer
-input_transfer send <input-device> <host> [port]     # share a device, connecting to a peer
-input_transfer receive --listen [port]               # recreate a device, waiting for a peer
-input_transfer receive <host> [port]                 # recreate a device, connecting to a peer
+input_transfer send -d <input-device> [-d <input-device> ...] --listen [port]   # share device(s), waiting for a peer
+input_transfer send -d <input-device> [-d <input-device> ...] <host> [port]     # share device(s), connecting to a peer
+input_transfer receive --listen [port]                                         # recreate device(s), waiting for a peer
+input_transfer receive <host> [port]                                           # recreate device(s), connecting to a peer
 ```
 
-`port` defaults to `9111`. `<host>` may be a hostname (resolved via
-DNS/`/etc/hosts`) or a numeric IPv4/IPv6 address.
+`-d <input-device>` may be repeated (up to 32 times) to share several
+devices over one connection; `receive` needs no device arguments — it
+recreates whatever the peer announces. `port` defaults to `9111`.
+`<host>` may be a hostname (resolved via DNS/`/etc/hosts`) or a numeric
+IPv4/IPv6 address.
 
-For example, to share the physical device at `/dev/input/event3` from
-machine A to machine B, with A listening for the connection:
+For example, to share the physical devices at `/dev/input/event3` and
+`/dev/input/event4` from machine A to machine B, with A listening for
+the connection:
 
 ```sh
-# on machine A (owns the physical device)
-sudo ./input_transfer send /dev/input/event3 --listen
+# on machine A (owns the physical devices)
+sudo ./input_transfer send -d /dev/input/event3 -d /dev/input/event4 --listen
 
-# on machine B (should receive the device)
+# on machine B (should receive the devices)
 sudo ./input_transfer receive machine-a.local
 ```
 
@@ -59,7 +66,7 @@ Or with B listening instead (e.g. because A is behind NAT):
 sudo ./input_transfer receive --listen
 
 # on machine A
-sudo ./input_transfer send /dev/input/event3 machine-b.local
+sudo ./input_transfer send -d /dev/input/event3 -d /dev/input/event4 machine-b.local
 ```
 
 `send` (reading `/dev/input/eventX` and `EVIOCGRAB`) and `receive`
@@ -73,7 +80,10 @@ Notes:
 - The protocol (see `input_net_proto.h`) assumes both sides run with a
   compatible `struct input_event` ABI (matching architecture word
   size/endianness), which holds for typical same-family Linux hosts on
-  a local network.
+  a local network. One stream header + device-info record per device is
+  sent once at the start of each connection; every subsequent event is
+  tagged with a device index so devices are multiplexed over the one
+  connection.
 
 ### Running as systemd services
 
@@ -81,19 +91,21 @@ Notes:
 a persistent service, restarting on failure/disconnect:
 
 - `input-transfer-send.service` + `input-transfer-send.env` — runs
-  `input_transfer send $INPUT_DEVICE $REMOTE_HOST $REMOTE_PORT`, i.e.
-  shares a local device by connecting out to a listening peer.
+  `input_transfer send $INPUT_DEVICES $REMOTE_HOST $REMOTE_PORT`
+  (`$INPUT_DEVICES` expands unquoted to one or more `-d <device>`
+  flags), i.e. shares one or more local devices by connecting out to a
+  listening peer.
 - `input-transfer-receive.service` + `input-transfer-receive.env` —
   runs `input_transfer receive --listen $LISTEN_PORT`, i.e. waits for a
-  peer to connect and recreates its device locally.
+  peer to connect and recreates its device(s) locally.
 
-Install (as root), on the machine owning the physical device:
+Install (as root), on the machine owning the physical device(s):
 
 ```sh
 install -m755 build/input_transfer /usr/local/bin/input_transfer
 install -m644 systemd/input-transfer-send.service /etc/systemd/system/
 install -m600 systemd/input-transfer-send.env /etc/default/input-transfer-send
-$EDITOR /etc/default/input-transfer-send   # set INPUT_DEVICE/REMOTE_HOST/REMOTE_PORT
+$EDITOR /etc/default/input-transfer-send   # set INPUT_DEVICES/REMOTE_HOST/REMOTE_PORT
 systemctl daemon-reload
 systemctl enable --now input-transfer-send.service
 ```
@@ -110,12 +122,12 @@ systemctl enable --now input-transfer-receive.service
 ```
 
 Both services run as root (`Type=simple`, restart on failure) since
-`send` needs to read the `/dev/input/eventX` node and `EVIOCGRAB` it,
-and `receive` needs to write to `/dev/uinput`; adjust `User=`/
+`send` needs to read the `/dev/input/eventX` node(s) and `EVIOCGRAB`
+them, and `receive` needs to write to `/dev/uinput`; adjust `User=`/
 `DeviceAllow=`/udev rules if you want to run unprivileged with scoped
 device permissions instead. To pair a listening sender with a
 connecting receiver instead, swap which unit uses `--listen`
-(`input_transfer send $INPUT_DEVICE --listen $LISTEN_PORT` /
+(`input_transfer send $INPUT_DEVICES --listen $LISTEN_PORT` /
 `input_transfer receive $REMOTE_HOST $REMOTE_PORT`) by editing the
 `ExecStart=` line accordingly.
 

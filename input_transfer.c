@@ -1,21 +1,22 @@
-/* input_transfer: transfer a Linux input device (evdev) between two
- * machines over the network, in either direction, with either side acting
- * as the TCP listener or the connector.
+/* input_transfer: transfer one or more Linux input devices (evdev) between
+ * two machines over the network, in either direction, with either side
+ * acting as the TCP listener or the connector.
  *
  * Usage:
- *   input_transfer send <input-device> --listen [port]
- *   input_transfer send <input-device> <host> [port]
+ *   input_transfer send -d <input-device> [-d <input-device> ...] --listen [port]
+ *   input_transfer send -d <input-device> [-d <input-device> ...] <host> [port]
  *   input_transfer receive --listen [port]
  *   input_transfer receive <host> [port]
  *
- * "send" opens <input-device> (e.g. /dev/input/eventX), grabs it
+ * "send" opens each -d <input-device> (e.g. /dev/input/eventX), grabs it
  * exclusively (EVIOCGRAB, best-effort so it stops acting locally while
- * shared), and streams its capabilities followed by its events to the
+ * shared), and streams a stream header + all devices' capabilities
+ * followed by a multiplexed (index-tagged) stream of their events to the
  * peer.
  *
- * "receive" recreates a matching virtual device locally via /dev/uinput,
- * based on the capabilities received from the peer, and replays every
- * event received onto it.
+ * "receive" recreates a matching virtual device locally via /dev/uinput
+ * for each device announced by the peer, and replays every received
+ * (index-tagged) event onto the matching device.
  *
  * --listen makes this process wait for a peer to connect (serving one
  * peer at a time, repeatedly); otherwise it connects to <host>[:port]
@@ -43,16 +44,22 @@ enum transfer_direction {
 };
 
 static void print_usage(FILE *out, const char *prog) {
-    fprintf(out, "usage: %s send <input-device> --listen [port]\n", prog);
-    fprintf(out, "       %s send <input-device> <host> [port]\n", prog);
+    fprintf(out, "usage: %s send -d <input-device> [-d <input-device> ...] --listen [port]\n",
+            prog);
+    fprintf(out, "       %s send -d <input-device> [-d <input-device> ...] <host> [port]\n",
+            prog);
     fprintf(out, "       %s receive --listen [port]\n", prog);
     fprintf(out, "       %s receive <host> [port]\n", prog);
     fprintf(out, "\n");
     fprintf(out,
-            "  send <input-device>: open and share this device (e.g. /dev/input/event3,\n");
-    fprintf(out, "                       see /proc/bus/input/devices), grabbing it\n");
-    fprintf(out, "                       exclusively so it stops acting locally\n");
-    fprintf(out, "  receive: recreate the peer's device locally via /dev/uinput\n");
+            "  send -d <input-device>: open and share this device (e.g. /dev/input/event3,\n");
+    fprintf(out, "                         see /proc/bus/input/devices), grabbing it\n");
+    fprintf(out, "                         exclusively so it stops acting locally. May be\n");
+    fprintf(out, "                         given multiple times (up to %d) to share several\n",
+            INPUT_NET_MAX_DEVICES);
+    fprintf(out, "                         devices over one connection.\n");
+    fprintf(out,
+            "  receive: recreate every device announced by the peer, locally via /dev/uinput\n");
     fprintf(out, "  --listen [port]: wait for a peer to connect, instead of connecting to\n");
     fprintf(out, "                    one (default port %d, one peer at a time)\n",
             INPUT_NET_PORT_DEFAULT);
@@ -62,19 +69,33 @@ static void print_usage(FILE *out, const char *prog) {
     fprintf(out, "  -h, --help: show this help and exit\n");
 }
 
-/* Opens <input-device>, grabs it exclusively (best-effort), and sends it
- * over sock_fd until the peer disconnects. */
-static void run_send(const char *dev_path, int sock_fd) {
-    int dev_fd = open(dev_path, O_RDONLY);
-    if (dev_fd < 0) {
-        perror("open device");
-        return;
+/* Opens each of dev_paths[0..dev_count-1], grabs it exclusively
+ * (best-effort), and sends all of them multiplexed over sock_fd until
+ * the peer disconnects. Closes every opened fd before returning. */
+static void run_send(const char **dev_paths, int dev_count, int sock_fd) {
+    int dev_fds[INPUT_NET_MAX_DEVICES];
+    int opened = 0;
+
+    for (int i = 0; i < dev_count; i++) {
+        int fd = open(dev_paths[i], O_RDONLY);
+        if (fd < 0) {
+            fprintf(stderr, "open %s: %s\n", dev_paths[i], strerror(errno));
+            goto cleanup;
+        }
+        if (ioctl(fd, EVIOCGRAB, 1) < 0) {
+            fprintf(stderr, "EVIOCGRAB %s: %s (continuing without exclusive grab)\n",
+                    dev_paths[i], strerror(errno));
+        }
+        dev_fds[i] = fd;
+        opened++;
     }
-    if (ioctl(dev_fd, EVIOCGRAB, 1) < 0) {
-        perror("EVIOCGRAB (continuing without exclusive grab)");
+
+    input_net_send_devices(dev_fds, dev_count, sock_fd);
+
+cleanup:
+    for (int i = 0; i < opened; i++) {
+        close(dev_fds[i]);
     }
-    input_net_send_device(dev_fd, sock_fd);
-    close(dev_fd);
 }
 
 int main(int argc, char **argv) {
@@ -88,18 +109,31 @@ int main(int argc, char **argv) {
     }
 
     enum transfer_direction direction;
-    const char *dev_path = NULL;
+    const char *dev_paths[INPUT_NET_MAX_DEVICES];
+    int dev_count = 0;
     int next = 2;
 
     if (strcmp(argv[1], "send") == 0) {
         direction = DIRECTION_SEND;
-        if (argc < 3) {
-            fprintf(stderr, "send requires <input-device>\n");
+        next = 2;
+        while (next < argc && (strcmp(argv[next], "-d") == 0 || strcmp(argv[next], "--device") == 0)) {
+            if (next + 1 >= argc) {
+                fprintf(stderr, "%s requires an argument\n", argv[next]);
+                print_usage(stderr, argv[0]);
+                return 1;
+            }
+            if (dev_count >= INPUT_NET_MAX_DEVICES) {
+                fprintf(stderr, "too many devices (max %d)\n", INPUT_NET_MAX_DEVICES);
+                return 1;
+            }
+            dev_paths[dev_count++] = argv[next + 1];
+            next += 2;
+        }
+        if (dev_count == 0) {
+            fprintf(stderr, "send requires at least one -d <input-device>\n");
             print_usage(stderr, argv[0]);
             return 1;
         }
-        dev_path = argv[2];
-        next = 3;
     } else if (strcmp(argv[1], "receive") == 0) {
         direction = DIRECTION_RECEIVE;
         next = 2;
@@ -139,10 +173,10 @@ int main(int argc, char **argv) {
             return 1;
         }
         if (direction == DIRECTION_SEND) {
-            printf("Listening on port %d, will share '%s' with connecting peers\n", port,
-                   dev_path);
+            printf("Listening on port %d, will share %d device(s) with connecting peers\n", port,
+                   dev_count);
         } else {
-            printf("Listening on port %d, will receive a device from connecting peers\n", port);
+            printf("Listening on port %d, will receive device(s) from connecting peers\n", port);
         }
 
         for (;;) {
@@ -159,9 +193,9 @@ int main(int argc, char **argv) {
             setsockopt(peer_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
             if (direction == DIRECTION_SEND) {
-                run_send(dev_path, peer_fd);
+                run_send(dev_paths, dev_count, peer_fd);
             } else {
-                input_net_receive_device(peer_fd);
+                input_net_receive_devices(peer_fd);
             }
 
             close(peer_fd);
@@ -179,11 +213,11 @@ int main(int argc, char **argv) {
 
         int rc = 0;
         if (direction == DIRECTION_SEND) {
-            printf("Connecting to %s:%d to send '%s'\n", host, port, dev_path);
-            run_send(dev_path, sock_fd);
+            printf("Connecting to %s:%d to send %d device(s)\n", host, port, dev_count);
+            run_send(dev_paths, dev_count, sock_fd);
         } else {
-            printf("Connecting to %s:%d to receive a device\n", host, port);
-            rc = input_net_receive_device(sock_fd);
+            printf("Connecting to %s:%d to receive device(s)\n", host, port);
+            rc = input_net_receive_devices(sock_fd);
         }
 
         close(sock_fd);
