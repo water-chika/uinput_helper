@@ -53,3 +53,18 @@ Notes:
   with a compatible `struct input_event` ABI (matching architecture
   word size/endianness), which holds for typical same-family Linux
   hosts on a local network.
+
+## Inspecting a device's events
+
+`input_dump` opens an evdev device, prints a summary of its capabilities
+(supported event types/codes, and abs axis ranges), then prints every
+event it receives in a human-readable form (timestamp, type, code,
+value) using `libevdev`'s name lookups.
+
+```sh
+sudo ./input_dump /dev/input/event3
+```
+
+Handy for finding the right `/dev/input/eventX` node and its capabilities
+before pointing `input_server` at it, or for verifying what a device
+actually sends. Requires `libevdev` (`pkg-config libevdev`) to build.

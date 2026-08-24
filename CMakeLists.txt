@@ -14,4 +14,12 @@ add_executable(input_client
 	input_client.c
 )
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBEVDEV REQUIRED IMPORTED_TARGET libevdev)
+
+add_executable(input_dump
+	input_dump.c
+)
+target_link_libraries(input_dump PRIVATE PkgConfig::LIBEVDEV)
+
 
