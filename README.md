@@ -90,22 +90,33 @@ Notes:
 `systemd/` contains ready-to-use unit files to run `input_transfer` as
 a persistent service, restarting on failure/disconnect:
 
-- `input-transfer-send.service` + `input-transfer-send.env` — runs
-  `input_transfer send $INPUT_DEVICES $REMOTE_HOST $REMOTE_PORT`
-  (`$INPUT_DEVICES` expands unquoted to one or more `-d <device>`
-  flags), i.e. shares one or more local devices by connecting out to a
-  listening peer.
+- `input-transfer-send.service` + `input-transfer-send.env` +
+  `input-transfer-send.sh` — the service runs the `input-transfer-send.sh`
+  wrapper script, which reads the device list from a config file (one
+  `/dev/input/eventN` path per line, `#` comments and blank lines
+  ignored — see `devices.conf.example`) and execs `input_transfer send`
+  with one `-d <device>` per line, either connecting out to
+  `$REMOTE_HOST:$REMOTE_PORT` or, if `LISTEN=1`, listening on
+  `$LISTEN_PORT` instead. This way the device list can be edited (and
+  the service restarted) without touching the unit file, and doesn't
+  depend on shell word-splitting of an environment variable.
 - `input-transfer-receive.service` + `input-transfer-receive.env` —
   runs `input_transfer receive --listen $LISTEN_PORT`, i.e. waits for a
-  peer to connect and recreates its device(s) locally.
+  peer to connect and recreates its device(s) locally (`receive` takes
+  no device arguments — it recreates whatever the peer announces, so it
+  needs no devices config file).
 
 Install (as root), on the machine owning the physical device(s):
 
 ```sh
 install -m755 build/input_transfer /usr/local/bin/input_transfer
+install -m755 systemd/input-transfer-send.sh /usr/local/bin/input-transfer-send.sh
 install -m644 systemd/input-transfer-send.service /etc/systemd/system/
 install -m600 systemd/input-transfer-send.env /etc/default/input-transfer-send
-$EDITOR /etc/default/input-transfer-send   # set INPUT_DEVICES/REMOTE_HOST/REMOTE_PORT
+mkdir -p /etc/input-transfer
+install -m644 systemd/devices.conf.example /etc/input-transfer/devices.conf
+$EDITOR /etc/input-transfer/devices.conf   # list the device node(s) to share
+$EDITOR /etc/default/input-transfer-send   # set REMOTE_HOST/REMOTE_PORT (or LISTEN=1/LISTEN_PORT)
 systemctl daemon-reload
 systemctl enable --now input-transfer-send.service
 ```
@@ -126,10 +137,10 @@ Both services run as root (`Type=simple`, restart on failure) since
 them, and `receive` needs to write to `/dev/uinput`; adjust `User=`/
 `DeviceAllow=`/udev rules if you want to run unprivileged with scoped
 device permissions instead. To pair a listening sender with a
-connecting receiver instead, swap which unit uses `--listen`
-(`input_transfer send $INPUT_DEVICES --listen $LISTEN_PORT` /
-`input_transfer receive $REMOTE_HOST $REMOTE_PORT`) by editing the
-`ExecStart=` line accordingly.
+connecting receiver instead, set `LISTEN=1` (and optionally
+`LISTEN_PORT`) in `/etc/default/input-transfer-send` and point
+`input-transfer-receive.service`'s peer at it via `input_transfer
+receive <host> [port]` on the other machine.
 
 ## Inspecting a device's events
 

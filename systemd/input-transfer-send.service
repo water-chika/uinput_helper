@@ -6,15 +6,13 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/default/input-transfer-send
-# INPUT_DEVICES is unquoted so the shell splits it into multiple -d
-# arguments, e.g. INPUT_DEVICES="-d /dev/input/event3 -d /dev/input/event4"
-ExecStart=/bin/sh -c '/usr/local/bin/input_transfer send $INPUT_DEVICES ${REMOTE_HOST} ${REMOTE_PORT}'
+ExecStart=/usr/local/bin/input-transfer-send.sh
 Restart=on-failure
 RestartSec=2
 
-# Hardening (DeviceAllow/etc. can't reference EnvironmentFile variables,
-# so device access is left open here; tighten with a static DeviceAllow=
-# for your specific /dev/input/eventN if desired)
+# Hardening (DeviceAllow can't reference the devices config file's
+# contents, so device access is left open here; tighten with a static
+# DeviceAllow= for your specific /dev/input/eventN if desired)
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

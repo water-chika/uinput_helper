@@ -1,0 +1,8 @@
+# /etc/input-transfer/devices.conf
+#
+# One input device node per line, shared by input-transfer-send.service.
+# Find device nodes via /proc/bus/input/devices or `input_dump` (no args).
+# Blank lines and lines starting with '#' are ignored.
+
+/dev/input/event3
+#/dev/input/event4
