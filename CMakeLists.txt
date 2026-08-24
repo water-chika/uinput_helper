@@ -6,12 +6,8 @@ add_executable(uinput_test
 	uinput_test.c
 )
 
-add_executable(input_server
-	input_server.c
-)
-
-add_executable(input_client
-	input_client.c
+add_executable(input_transfer
+	input_transfer.c
 )
 
 find_package(PkgConfig REQUIRED)

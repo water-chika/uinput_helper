@@ -10,52 +10,70 @@ you drive its axes/buttons from stdin (`x <value>`, `y <value>`,
 
 ## Transferring an input device over the network
 
-`input_server` and `input_client` let you take a real input device
-(mouse, keyboard, joystick, etc.) attached to one machine and make it
-appear as a virtual device on another machine, over a plain TCP
-connection.
+`input_transfer` lets you take a real input device (mouse, keyboard,
+joystick, etc.) attached to one machine and make it appear as a virtual
+device on another machine, over a plain TCP connection. Either side can
+send or receive, and either side can be the one that listens for a
+connection vs. the one that connects out — pick whichever combination
+suits your network (e.g. the side without a routable/open port should
+usually be the one that connects out).
 
-- **input_server** opens a real evdev device (e.g. `/dev/input/eventX`),
-  grabs it exclusively so events stop being delivered locally
-  (`EVIOCGRAB`), reads its capabilities (event/key/rel/abs bits and
-  abs axis info), and listens for TCP clients. Once a client connects,
-  it sends the device's capabilities once, then streams every
-  `input_event` it reads from the device to the client.
+- **send** opens a real evdev device (e.g. `/dev/input/eventX`), grabs
+  it exclusively so events stop being delivered locally (`EVIOCGRAB`,
+  best-effort), reads its capabilities (event/key/rel/abs bits and abs
+  axis info), and sends them once to the peer, followed by every
+  `input_event` read from the device.
 
-- **input_client** connects to `input_server`, receives the device
-  capabilities, creates a matching virtual device via `/dev/uinput`
-  (same event/key/rel/abs bits and abs axis ranges), and replays every
-  event it receives onto that virtual device.
+- **receive** waits for a peer's device capabilities, creates a
+  matching virtual device via `/dev/uinput` (same event/key/rel/abs
+  bits and abs axis ranges), and replays every event received onto
+  that virtual device.
 
 ### Usage
 
-On the machine that owns the physical device:
-
 ```sh
-# find the device node, e.g. from /proc/bus/input/devices or evtest
-sudo ./input_server /dev/input/event3 [port]   # port defaults to 9111
+input_transfer send <input-device> --listen [port]   # share a device, waiting for a peer
+input_transfer send <input-device> <host> [port]     # share a device, connecting to a peer
+input_transfer receive --listen [port]               # recreate a device, waiting for a peer
+input_transfer receive <host> [port]                 # recreate a device, connecting to a peer
 ```
 
-On the machine that should receive the device:
+`port` defaults to `9111`. `<host>` may be a hostname (resolved via
+DNS/`/etc/hosts`) or a numeric IPv4/IPv6 address.
+
+For example, to share the physical device at `/dev/input/event3` from
+machine A to machine B, with A listening for the connection:
 
 ```sh
-sudo ./input_client <server-host> [port]
+# on machine A (owns the physical device)
+sudo ./input_transfer send /dev/input/event3 --listen
+
+# on machine B (should receive the device)
+sudo ./input_transfer receive machine-a.local
 ```
 
-`<server-host>` may be a hostname (resolved via DNS/`/etc/hosts`) or a
-numeric IPv4/IPv6 address.
+Or with B listening instead (e.g. because A is behind NAT):
 
-Both `input_server` (reading `/dev/input/eventX` and `EVIOCGRAB`) and
-`input_client` (writing to `/dev/uinput`) typically require root, or
-appropriate udev permissions on those device nodes.
+```sh
+# on machine B
+sudo ./input_transfer receive --listen
+
+# on machine A
+sudo ./input_transfer send /dev/input/event3 machine-b.local
+```
+
+`send` (reading `/dev/input/eventX` and `EVIOCGRAB`) and `receive`
+(writing to `/dev/uinput`) typically require root, or appropriate udev
+permissions on those device nodes.
 
 Notes:
-- Only one client is served at a time; `input_server` accepts a new
-  client after the previous one disconnects.
-- The protocol (see `input_net_proto.h`) assumes client and server run
-  with a compatible `struct input_event` ABI (matching architecture
-  word size/endianness), which holds for typical same-family Linux
-  hosts on a local network.
+- In `--listen` mode, only one peer is served at a time;
+  `input_transfer` accepts a new peer after the previous one
+  disconnects.
+- The protocol (see `input_net_proto.h`) assumes both sides run with a
+  compatible `struct input_event` ABI (matching architecture word
+  size/endianness), which holds for typical same-family Linux hosts on
+  a local network.
 
 ## Inspecting a device's events
 
@@ -76,5 +94,5 @@ multiplexes their events with `poll()`, each line prefixed by the
 originating device path.
 
 Handy for finding the right `/dev/input/eventX` node and its capabilities
-before pointing `input_server` at it, or for verifying what a device
+before pointing `input_transfer` at it, or for verifying what a device
 actually sends. Requires `libevdev` (`pkg-config libevdev`) to build.
