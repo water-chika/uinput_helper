@@ -56,14 +56,21 @@ Notes:
 
 ## Inspecting a device's events
 
-`input_dump` opens an evdev device, prints a summary of its capabilities
-(supported event types/codes, and abs axis ranges), then prints every
-event it receives in a human-readable form (timestamp, type, code,
-value) using `libevdev`'s name lookups.
+`input_dump` opens one or more evdev devices, prints a summary of each
+device's capabilities (supported event types/codes, and abs axis
+ranges), then prints every event received from any of them in a
+human-readable form (device path, timestamp, type, code, value) using
+`libevdev`'s name lookups.
 
 ```sh
-sudo ./input_dump /dev/input/event3
+sudo ./input_dump /dev/input/event3      # dump a single device
+sudo ./input_dump                        # dump every /dev/input/eventN device
 ```
+
+With no arguments it discovers and opens every `/dev/input/eventN`
+device node (skipping any it can't open, e.g. due to permissions) and
+multiplexes their events with `poll()`, each line prefixed by the
+originating device path.
 
 Handy for finding the right `/dev/input/eventX` node and its capabilities
 before pointing `input_server` at it, or for verifying what a device
