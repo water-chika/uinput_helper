@@ -78,11 +78,20 @@ static void serve_client(int dev_fd, int client_fd, const struct input_net_devic
     }
 }
 
+static void print_usage(FILE *out, const char *prog) {
+    fprintf(out, "usage: %s <input-device> [port]\n", prog);
+    fprintf(out, "  input-device: e.g. /dev/input/event3 (see /proc/bus/input/devices)\n");
+    fprintf(out, "  port: TCP port to listen on (default %d)\n", INPUT_NET_PORT_DEFAULT);
+    fprintf(out, "  -h, --help: show this help and exit\n");
+}
+
 int main(int argc, char **argv) {
+    if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
+        print_usage(stdout, argv[0]);
+        return 0;
+    }
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <input-device> [port]\n", argv[0]);
-        fprintf(stderr, "  input-device: e.g. /dev/input/event3 (see /proc/bus/input/devices)\n");
-        fprintf(stderr, "  port: TCP port to listen on (default %d)\n", INPUT_NET_PORT_DEFAULT);
+        print_usage(stderr, argv[0]);
         return 1;
     }
     const char *dev_path = argv[1];

@@ -75,11 +75,19 @@ static int create_uinput_device(const struct input_net_device_info *info) {
     return uinput_fd;
 }
 
+static void print_usage(FILE *out, const char *prog) {
+    fprintf(out, "usage: %s <server-ip> [port]\n", prog);
+    fprintf(out, "  port: TCP port the server listens on (default %d)\n", INPUT_NET_PORT_DEFAULT);
+    fprintf(out, "  -h, --help: show this help and exit\n");
+}
+
 int main(int argc, char **argv) {
+    if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
+        print_usage(stdout, argv[0]);
+        return 0;
+    }
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <server-ip> [port]\n", argv[0]);
-        fprintf(stderr, "  port: TCP port the server listens on (default %d)\n",
-                INPUT_NET_PORT_DEFAULT);
+        print_usage(stderr, argv[0]);
         return 1;
     }
     const char *server_ip = argv[1];
