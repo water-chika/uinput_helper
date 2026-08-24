@@ -1,0 +1,20 @@
+[Unit]
+Description=Receive an input device via input_transfer (listening)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/input-transfer-receive
+ExecStart=/usr/local/bin/input_transfer receive --listen ${LISTEN_PORT}
+Restart=on-failure
+RestartSec=2
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

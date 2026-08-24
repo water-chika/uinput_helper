@@ -1,0 +1,22 @@
+[Unit]
+Description=Send an input device to a remote host via input_transfer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/input-transfer-send
+ExecStart=/usr/local/bin/input_transfer send ${INPUT_DEVICE} ${REMOTE_HOST} ${REMOTE_PORT}
+Restart=on-failure
+RestartSec=2
+
+# Hardening (DeviceAllow/etc. can't reference EnvironmentFile variables,
+# so device access is left open here; tighten with a static DeviceAllow=
+# for your specific /dev/input/eventN if desired)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

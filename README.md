@@ -75,6 +75,50 @@ Notes:
   size/endianness), which holds for typical same-family Linux hosts on
   a local network.
 
+### Running as systemd services
+
+`systemd/` contains ready-to-use unit files to run `input_transfer` as
+a persistent service, restarting on failure/disconnect:
+
+- `input-transfer-send.service` + `input-transfer-send.env` — runs
+  `input_transfer send $INPUT_DEVICE $REMOTE_HOST $REMOTE_PORT`, i.e.
+  shares a local device by connecting out to a listening peer.
+- `input-transfer-receive.service` + `input-transfer-receive.env` —
+  runs `input_transfer receive --listen $LISTEN_PORT`, i.e. waits for a
+  peer to connect and recreates its device locally.
+
+Install (as root), on the machine owning the physical device:
+
+```sh
+install -m755 build/input_transfer /usr/local/bin/input_transfer
+install -m644 systemd/input-transfer-send.service /etc/systemd/system/
+install -m600 systemd/input-transfer-send.env /etc/default/input-transfer-send
+$EDITOR /etc/default/input-transfer-send   # set INPUT_DEVICE/REMOTE_HOST/REMOTE_PORT
+systemctl daemon-reload
+systemctl enable --now input-transfer-send.service
+```
+
+And on the receiving machine:
+
+```sh
+install -m755 build/input_transfer /usr/local/bin/input_transfer
+install -m644 systemd/input-transfer-receive.service /etc/systemd/system/
+install -m600 systemd/input-transfer-receive.env /etc/default/input-transfer-receive
+$EDITOR /etc/default/input-transfer-receive   # set LISTEN_PORT
+systemctl daemon-reload
+systemctl enable --now input-transfer-receive.service
+```
+
+Both services run as root (`Type=simple`, restart on failure) since
+`send` needs to read the `/dev/input/eventX` node and `EVIOCGRAB` it,
+and `receive` needs to write to `/dev/uinput`; adjust `User=`/
+`DeviceAllow=`/udev rules if you want to run unprivileged with scoped
+device permissions instead. To pair a listening sender with a
+connecting receiver instead, swap which unit uses `--listen`
+(`input_transfer send $INPUT_DEVICE --listen $LISTEN_PORT` /
+`input_transfer receive $REMOTE_HOST $REMOTE_PORT`) by editing the
+`ExecStart=` line accordingly.
+
 ## Inspecting a device's events
 
 `input_dump` opens one or more evdev devices, prints a summary of each
