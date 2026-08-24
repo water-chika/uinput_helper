@@ -7,7 +7,9 @@
 #include "input_net_proto.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stdio.h>
@@ -75,8 +77,49 @@ static int create_uinput_device(const struct input_net_device_info *info) {
     return uinput_fd;
 }
 
+/* Resolves host (hostname or numeric IPv4/IPv6 address) and port, and
+ * connects to the first address that succeeds. Returns a connected socket
+ * fd, or -1 on failure. */
+static int connect_to_server(const char *host, int port) {
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo *result = NULL;
+    int gai_rc = getaddrinfo(host, port_str, &hints, &result);
+    if (gai_rc != 0) {
+        fprintf(stderr, "failed to resolve %s: %s\n", host, gai_strerror(gai_rc));
+        return -1;
+    }
+
+    int sock_fd = -1;
+    for (struct addrinfo *rp = result; rp != NULL; rp = rp->ai_next) {
+        sock_fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (sock_fd < 0) {
+            continue;
+        }
+        if (connect(sock_fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+            break;
+        }
+        close(sock_fd);
+        sock_fd = -1;
+    }
+
+    freeaddrinfo(result);
+
+    if (sock_fd < 0) {
+        fprintf(stderr, "failed to connect to %s:%d: %s\n", host, port, strerror(errno));
+    }
+    return sock_fd;
+}
+
 static void print_usage(FILE *out, const char *prog) {
-    fprintf(out, "usage: %s <server-ip> [port]\n", prog);
+    fprintf(out, "usage: %s <server-host> [port]\n", prog);
+    fprintf(out, "  server-host: hostname or IP address of the input_server\n");
     fprintf(out, "  port: TCP port the server listens on (default %d)\n", INPUT_NET_PORT_DEFAULT);
     fprintf(out, "  -h, --help: show this help and exit\n");
 }
@@ -90,26 +133,11 @@ int main(int argc, char **argv) {
         print_usage(stderr, argv[0]);
         return 1;
     }
-    const char *server_ip = argv[1];
+    const char *server_host = argv[1];
     int port = argc >= 3 ? atoi(argv[2]) : INPUT_NET_PORT_DEFAULT;
 
-    int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int sock_fd = connect_to_server(server_host, port);
     if (sock_fd < 0) {
-        perror("socket");
-        return 1;
-    }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)port);
-    if (inet_pton(AF_INET, server_ip, &addr.sin_addr) != 1) {
-        fprintf(stderr, "invalid server address: %s\n", server_ip);
-        return 1;
-    }
-
-    if (connect(sock_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("connect");
         return 1;
     }
 
@@ -133,7 +161,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    printf("Forwarding events from %s:%d\n", server_ip, port);
+    printf("Forwarding events from %s:%d\n", server_host, port);
 
     struct input_event ev;
     for (;;) {

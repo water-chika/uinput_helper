@@ -39,8 +39,11 @@ sudo ./input_server /dev/input/event3 [port]   # port defaults to 9111
 On the machine that should receive the device:
 
 ```sh
-sudo ./input_client <server-ip> [port]
+sudo ./input_client <server-host> [port]
 ```
+
+`<server-host>` may be a hostname (resolved via DNS/`/etc/hosts`) or a
+numeric IPv4/IPv6 address.
 
 Both `input_server` (reading `/dev/input/eventX` and `EVIOCGRAB`) and
 `input_client` (writing to `/dev/uinput`) typically require root, or
