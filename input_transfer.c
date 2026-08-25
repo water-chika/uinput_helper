@@ -24,6 +24,10 @@
  * be combined with either --listen or <host>, so e.g. a "send --listen"
  * process can be paired with a "receive <host>" process, or a
  * "receive --listen" process can be paired with a "send <host>" process.
+ *
+ * --log-level <level> (or $INPUT_TRANSFER_LOG_LEVEL) selects how much is
+ * logged: quiet, error, warn, info (default), debug or trace. It may
+ * appear anywhere on the command line.
  */
 #include "input_net_proto.h"
 
@@ -42,6 +46,11 @@ enum transfer_direction {
     DIRECTION_SEND,
     DIRECTION_RECEIVE,
 };
+
+/* Environment fallback for --log-level, so the systemd units (and any
+ * other wrapper that builds the argument list itself) can set verbosity
+ * without touching the command line. An explicit --log-level wins. */
+#define INPUT_TRANSFER_LOG_LEVEL_ENV "INPUT_TRANSFER_LOG_LEVEL"
 
 static void print_usage(FILE *out, const char *prog) {
     fprintf(out, "usage: %s send -d <input-device> [-d <input-device> ...] --listen [port]\n",
@@ -66,6 +75,20 @@ static void print_usage(FILE *out, const char *prog) {
     fprintf(out,
             "  <host> [port]: connect to a peer's hostname or IP address, instead of\n");
     fprintf(out, "                 listening (default port %d)\n", INPUT_NET_PORT_DEFAULT);
+    fprintf(out, "  --log-level <level>: how much to log (default %s). May appear anywhere on\n",
+            input_net_log_level_name(INPUT_NET_LOG_LEVEL_DEFAULT));
+    fprintf(out, "                 the command line, or be given via $%s. Levels,\n",
+            INPUT_TRANSFER_LOG_LEVEL_ENV);
+    fprintf(out, "                 quietest first (each also logs everything quieter than\n");
+    fprintf(out, "                 itself):\n");
+    fprintf(out, "                   quiet - nothing at all\n");
+    fprintf(out, "                   error - failures only\n");
+    fprintf(out, "                   warn  - plus non-fatal problems\n");
+    fprintf(out, "                   info  - plus connection/device lifecycle (default)\n");
+    fprintf(out, "                   debug - plus device capabilities and event counters\n");
+    fprintf(out, "                   trace - plus every forwarded event (very loud)\n");
+    fprintf(out, "                 A level may also be given by number, 0 (quiet) to %d (trace).\n",
+            INPUT_NET_LOG_TRACE);
     fprintf(out, "  -h, --help: show this help and exit\n");
 }
 
@@ -79,12 +102,13 @@ static void run_send(const char **dev_paths, int dev_count, int sock_fd) {
     for (int i = 0; i < dev_count; i++) {
         int fd = open(dev_paths[i], O_RDONLY);
         if (fd < 0) {
-            fprintf(stderr, "open %s: %s\n", dev_paths[i], strerror(errno));
+            input_net_log_errno(INPUT_NET_LOG_ERROR, "open %s", dev_paths[i]);
             goto cleanup;
         }
         if (ioctl(fd, EVIOCGRAB, 1) < 0) {
-            fprintf(stderr, "EVIOCGRAB %s: %s (continuing without exclusive grab)\n",
-                    dev_paths[i], strerror(errno));
+            input_net_log_errno(INPUT_NET_LOG_WARN,
+                                "EVIOCGRAB %s failed, continuing without exclusive grab",
+                                dev_paths[i]);
         }
         dev_fds[i] = fd;
         opened++;
@@ -98,8 +122,62 @@ cleanup:
     }
 }
 
+/* Applies $INPUT_TRANSFER_LOG_LEVEL, if set and valid. */
+static void apply_log_level_env(void) {
+    const char *env = getenv(INPUT_TRANSFER_LOG_LEVEL_ENV);
+    if (env == NULL || env[0] == '\0') {
+        return;
+    }
+    enum input_net_log_level level;
+    if (input_net_log_level_parse(env, &level) < 0) {
+        input_net_log(INPUT_NET_LOG_WARN, "ignoring invalid $%s '%s'",
+                      INPUT_TRANSFER_LOG_LEVEL_ENV, env);
+        return;
+    }
+    input_net_set_log_level(level);
+}
+
+/* Consumes any "--log-level <level>" (or "-L <level>") from argv,
+ * applying it and removing it from the array, so the remaining arguments
+ * can be parsed positionally as before and the option may appear
+ * anywhere. Returns the new argument count, or -1 if the option was
+ * given without/with an invalid value. */
+static int extract_log_level_args(int argc, char **argv) {
+    int out = 0;
+    for (int i = 0; i < argc; i++) {
+        int is_flag = (strcmp(argv[i], "--log-level") == 0 || strcmp(argv[i], "-L") == 0);
+        if (i == 0 || !is_flag) {
+            argv[out++] = argv[i];
+            continue;
+        }
+        if (i + 1 >= argc) {
+            input_net_log(INPUT_NET_LOG_ERROR, "%s requires a level argument", argv[i]);
+            return -1;
+        }
+        enum input_net_log_level level;
+        if (input_net_log_level_parse(argv[i + 1], &level) < 0) {
+            input_net_log(INPUT_NET_LOG_ERROR,
+                          "invalid log level '%s' (expected quiet/error/warn/info/debug/trace "
+                          "or 0-%d)",
+                          argv[i + 1], INPUT_NET_LOG_TRACE);
+            return -1;
+        }
+        input_net_set_log_level(level);
+        i++;
+    }
+    argv[out] = NULL;
+    return out;
+}
+
 int main(int argc, char **argv) {
     input_net_ignore_sigpipe();
+
+    apply_log_level_env();
+    argc = extract_log_level_args(argc, argv);
+    if (argc < 0) {
+        print_usage(stderr, argv[0]);
+        return 1;
+    }
 
     if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
         print_usage(stdout, argv[0]);
@@ -120,19 +198,20 @@ int main(int argc, char **argv) {
         next = 2;
         while (next < argc && (strcmp(argv[next], "-d") == 0 || strcmp(argv[next], "--device") == 0)) {
             if (next + 1 >= argc) {
-                fprintf(stderr, "%s requires an argument\n", argv[next]);
+                input_net_log(INPUT_NET_LOG_ERROR, "%s requires an argument", argv[next]);
                 print_usage(stderr, argv[0]);
                 return 1;
             }
             if (dev_count >= INPUT_NET_MAX_DEVICES) {
-                fprintf(stderr, "too many devices (max %d)\n", INPUT_NET_MAX_DEVICES);
+                input_net_log(INPUT_NET_LOG_ERROR, "too many devices (max %d)",
+                              INPUT_NET_MAX_DEVICES);
                 return 1;
             }
             dev_paths[dev_count++] = argv[next + 1];
             next += 2;
         }
         if (dev_count == 0) {
-            fprintf(stderr, "send requires at least one -d <input-device>\n");
+            input_net_log(INPUT_NET_LOG_ERROR, "send requires at least one -d <input-device>");
             print_usage(stderr, argv[0]);
             return 1;
         }
@@ -140,7 +219,8 @@ int main(int argc, char **argv) {
         direction = DIRECTION_RECEIVE;
         next = 2;
     } else {
-        fprintf(stderr, "unknown mode '%s' (expected 'send' or 'receive')\n", argv[1]);
+        input_net_log(INPUT_NET_LOG_ERROR, "unknown mode '%s' (expected 'send' or 'receive')",
+                      argv[1]);
         print_usage(stderr, argv[0]);
         return 1;
     }
@@ -164,7 +244,7 @@ int main(int argc, char **argv) {
             next++;
         }
     } else {
-        fprintf(stderr, "expected --listen or <host>\n");
+        input_net_log(INPUT_NET_LOG_ERROR, "expected --listen or <host>");
         print_usage(stderr, argv[0]);
         return 1;
     }
@@ -175,10 +255,12 @@ int main(int argc, char **argv) {
             return 1;
         }
         if (direction == DIRECTION_SEND) {
-            printf("Listening on port %d, will share %d device(s) with connecting peers\n", port,
-                   dev_count);
+            input_net_log(INPUT_NET_LOG_INFO,
+                          "Listening on port %d, will share %d device(s) with connecting peers",
+                          port, dev_count);
         } else {
-            printf("Listening on port %d, will receive device(s) from connecting peers\n", port);
+            input_net_log(INPUT_NET_LOG_INFO,
+                          "Listening on port %d, will receive device(s) from connecting peers", port);
         }
 
         for (;;) {
@@ -186,10 +268,10 @@ int main(int argc, char **argv) {
             socklen_t peer_len = sizeof(peer_addr);
             int peer_fd = accept(listen_fd, (struct sockaddr *)&peer_addr, &peer_len);
             if (peer_fd < 0) {
-                perror("accept");
+                input_net_log_errno(INPUT_NET_LOG_ERROR, "accept");
                 continue;
             }
-            printf("Peer connected: %s\n", inet_ntoa(peer_addr.sin_addr));
+            input_net_log(INPUT_NET_LOG_INFO, "Peer connected: %s", inet_ntoa(peer_addr.sin_addr));
 
             input_net_configure_socket(peer_fd);
 
@@ -200,7 +282,7 @@ int main(int argc, char **argv) {
             }
 
             close(peer_fd);
-            printf("Peer disconnected, waiting for next connection\n");
+            input_net_log(INPUT_NET_LOG_INFO, "Peer disconnected, waiting for next connection");
         }
         /* unreachable */
         close(listen_fd);
@@ -212,10 +294,12 @@ int main(int argc, char **argv) {
         int rc = 0;
         input_net_configure_socket(sock_fd);
         if (direction == DIRECTION_SEND) {
-            printf("Connecting to %s:%d to send %d device(s)\n", host, port, dev_count);
+            input_net_log(INPUT_NET_LOG_INFO, "Connecting to %s:%d to send %d device(s)", host,
+                          port, dev_count);
             run_send(dev_paths, dev_count, sock_fd);
         } else {
-            printf("Connecting to %s:%d to receive device(s)\n", host, port);
+            input_net_log(INPUT_NET_LOG_INFO, "Connecting to %s:%d to receive device(s)", host,
+                          port);
             rc = input_net_receive_devices(sock_fd);
         }
 

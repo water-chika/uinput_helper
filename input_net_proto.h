@@ -10,6 +10,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <sys/time.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -39,6 +40,112 @@
 
 #define INPUT_NET_MAGIC ((uint32_t)0x494e4554u) /* "INET" */
 #define INPUT_NET_PORT_DEFAULT 9111
+
+/* Log verbosity, ordered from quietest to loudest: each level also emits
+ * everything above it in this list. "quiet" silences even errors, for
+ * callers that only care about the exit status. */
+enum input_net_log_level {
+    INPUT_NET_LOG_QUIET = 0,
+    INPUT_NET_LOG_ERROR,
+    INPUT_NET_LOG_WARN,
+    INPUT_NET_LOG_INFO,
+    INPUT_NET_LOG_DEBUG,
+    INPUT_NET_LOG_TRACE,
+};
+
+#define INPUT_NET_LOG_LEVEL_DEFAULT INPUT_NET_LOG_INFO
+
+static enum input_net_log_level input_net_log_level = INPUT_NET_LOG_LEVEL_DEFAULT;
+
+static inline const char *input_net_log_level_name(enum input_net_log_level level) {
+    switch (level) {
+    case INPUT_NET_LOG_QUIET:
+        return "quiet";
+    case INPUT_NET_LOG_ERROR:
+        return "error";
+    case INPUT_NET_LOG_WARN:
+        return "warn";
+    case INPUT_NET_LOG_INFO:
+        return "info";
+    case INPUT_NET_LOG_DEBUG:
+        return "debug";
+    case INPUT_NET_LOG_TRACE:
+        return "trace";
+    }
+    return "?";
+}
+
+/* Parses a level given by name ("info") or by number ("3"). Returns 0 and
+ * stores the level on success, -1 if the string names no level. */
+static inline int input_net_log_level_parse(const char *text, enum input_net_log_level *out) {
+    if (text == NULL || text[0] == '\0') {
+        return -1;
+    }
+    for (int level = INPUT_NET_LOG_QUIET; level <= INPUT_NET_LOG_TRACE; level++) {
+        if (strcmp(text, input_net_log_level_name((enum input_net_log_level)level)) == 0) {
+            *out = (enum input_net_log_level)level;
+            return 0;
+        }
+    }
+    if (text[1] == '\0' && text[0] >= '0' && text[0] <= '0' + INPUT_NET_LOG_TRACE) {
+        *out = (enum input_net_log_level)(text[0] - '0');
+        return 0;
+    }
+    return -1;
+}
+
+static inline void input_net_set_log_level(enum input_net_log_level level) {
+    input_net_log_level = level;
+}
+
+static inline int input_net_log_enabled(enum input_net_log_level level) {
+    return level <= input_net_log_level;
+}
+
+/* Logs a message if level is enabled. Errors and warnings go to stderr so
+ * they stay visible when stdout is redirected/piped; informational output
+ * stays on stdout as before. Both are line-buffered explicitly via fflush
+ * so logs appear in real time under systemd/redirection. */
+__attribute__((format(printf, 2, 3))) static inline void
+input_net_log(enum input_net_log_level level, const char *fmt, ...) {
+    if (!input_net_log_enabled(level)) {
+        return;
+    }
+
+    FILE *out = (level <= INPUT_NET_LOG_WARN) ? stderr : stdout;
+    fprintf(out, "[%s] ", input_net_log_level_name(level));
+
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(out, fmt, args);
+    va_end(args);
+
+    fputc('\n', out);
+    fflush(out);
+}
+
+/* Like input_net_log(), but appends ": <strerror(errno)>" - the
+ * perror() replacement that honours the log level. errno is preserved so
+ * callers can still inspect it afterwards. */
+__attribute__((format(printf, 2, 3))) static inline void
+input_net_log_errno(enum input_net_log_level level, const char *fmt, ...) {
+    int saved_errno = errno;
+    if (!input_net_log_enabled(level)) {
+        return;
+    }
+
+    FILE *out = (level <= INPUT_NET_LOG_WARN) ? stderr : stdout;
+    fprintf(out, "[%s] ", input_net_log_level_name(level));
+
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(out, fmt, args);
+    va_end(args);
+
+    fprintf(out, ": %s\n", strerror(saved_errno));
+    fflush(out);
+    errno = saved_errno;
+}
 
 #define INPUT_NET_BITS_TO_BYTES(bit_count) (((bit_count) / 8) + 1)
 
@@ -126,6 +233,12 @@ static inline void input_net_configure_socket(int sock_fd) {
     snd_timeout.tv_sec = INPUT_NET_SEND_TIMEOUT;
     snd_timeout.tv_usec = 0;
     setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &snd_timeout, sizeof(snd_timeout));
+
+    input_net_log(INPUT_NET_LOG_DEBUG,
+                  "socket configured: nodelay, keepalive idle=%ds intvl=%ds cnt=%d, "
+                  "send timeout=%ds",
+                  INPUT_NET_KEEPALIVE_IDLE, INPUT_NET_KEEPALIVE_INTVL, INPUT_NET_KEEPALIVE_CNT,
+                  INPUT_NET_SEND_TIMEOUT);
 }
 
 /* A peer that disappears makes write() raise SIGPIPE, whose default action
@@ -218,7 +331,7 @@ static inline void input_net_fill_device_info(int dev_fd, struct input_net_devic
 static inline int input_net_create_uinput_device(const struct input_net_device_info *info) {
     int uinput_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (uinput_fd < 0) {
-        perror("open /dev/uinput");
+        input_net_log_errno(INPUT_NET_LOG_ERROR, "open /dev/uinput");
         return -1;
     }
 
@@ -259,18 +372,71 @@ static inline int input_net_create_uinput_device(const struct input_net_device_i
             sizeof(usetup.name) - 1);
 
     if (ioctl(uinput_fd, UI_DEV_SETUP, &usetup) < 0) {
-        perror("UI_DEV_SETUP");
+        input_net_log_errno(INPUT_NET_LOG_ERROR, "UI_DEV_SETUP");
         close(uinput_fd);
         return -1;
     }
     if (ioctl(uinput_fd, UI_DEV_CREATE) < 0) {
-        perror("UI_DEV_CREATE");
+        input_net_log_errno(INPUT_NET_LOG_ERROR, "UI_DEV_CREATE");
         close(uinput_fd);
         return -1;
     }
 
-    printf("Created virtual device '%s'\n", usetup.name);
+    input_net_log(INPUT_NET_LOG_INFO, "Created virtual device '%s'", usetup.name);
     return uinput_fd;
+}
+
+/* How many forwarded events between periodic debug-level throughput
+ * lines. Individual events are only logged at trace level, which is far
+ * too loud for anything but short debugging sessions. */
+#define INPUT_NET_LOG_EVENT_INTERVAL 100
+
+/* Logs one input event (device index, type/code/value) at the given
+ * level; direction is a short verb like "sent" or "replayed". */
+static inline void input_net_log_event(enum input_net_log_level level, const char *direction,
+                                       int dev_index, const struct input_event *ev) {
+    if (!input_net_log_enabled(level)) {
+        return;
+    }
+    input_net_log(level, "%s device[%d] type=0x%04x code=0x%04x value=%d", direction, dev_index,
+                  (unsigned)ev->type, (unsigned)ev->code, ev->value);
+}
+
+/* Logs a summary of a device's announced capabilities at the given
+ * level: its id, how many key/rel/abs codes it supports, and each abs
+ * axis' range. */
+static inline void input_net_log_device_info(enum input_net_log_level level, int dev_index,
+                                             const struct input_net_device_info *info) {
+    if (!input_net_log_enabled(level)) {
+        return;
+    }
+
+    int key_count = 0, rel_count = 0, abs_count = 0;
+    for (int code = 0; code <= KEY_MAX; code++) {
+        key_count += input_net_bit_is_set(info->key_bits, code);
+    }
+    for (int code = 0; code <= REL_MAX; code++) {
+        rel_count += input_net_bit_is_set(info->rel_bits, code);
+    }
+    for (int code = 0; code <= ABS_MAX; code++) {
+        abs_count += input_net_bit_is_set(info->abs_bits, code);
+    }
+
+    input_net_log(level,
+                  "device[%d] '%s' bus=0x%04x vendor=0x%04x product=0x%04x version=0x%04x "
+                  "keys=%d rels=%d abs=%d",
+                  dev_index, info->name, (unsigned)info->bustype, (unsigned)info->vendor,
+                  (unsigned)info->product, (unsigned)info->version, key_count, rel_count,
+                  abs_count);
+
+    for (int code = 0; code <= ABS_MAX; code++) {
+        if (input_net_bit_is_set(info->abs_bits, code)) {
+            const struct input_absinfo *abs = &info->absinfo[code];
+            input_net_log(level, "device[%d]   abs code 0x%02x: min=%d max=%d fuzz=%d flat=%d",
+                          dev_index, (unsigned)code, abs->minimum, abs->maximum, abs->fuzz,
+                          abs->flat);
+        }
+    }
 }
 
 /* Sends the capabilities of dev_fds[0..dev_count-1] to sock_fd (stream
@@ -282,7 +448,7 @@ static inline int input_net_create_uinput_device(const struct input_net_device_i
  * regardless of whether that side is the TCP listener or the connector. */
 static inline void input_net_send_devices(const int *dev_fds, int dev_count, int sock_fd) {
     if (dev_count <= 0 || dev_count > INPUT_NET_MAX_DEVICES) {
-        fprintf(stderr, "invalid device count %d\n", dev_count);
+        input_net_log(INPUT_NET_LOG_ERROR, "invalid device count %d", dev_count);
         return;
     }
 
@@ -290,7 +456,7 @@ static inline void input_net_send_devices(const int *dev_fds, int dev_count, int
     header.magic = INPUT_NET_MAGIC;
     header.device_count = (uint32_t)dev_count;
     if (input_net_write_full(sock_fd, &header, sizeof(header)) != (ssize_t)sizeof(header)) {
-        perror("send stream header");
+        input_net_log_errno(INPUT_NET_LOG_ERROR, "send stream header");
         return;
     }
 
@@ -298,10 +464,11 @@ static inline void input_net_send_devices(const int *dev_fds, int dev_count, int
         struct input_net_device_info info;
         input_net_fill_device_info(dev_fds[i], &info);
         if (input_net_write_full(sock_fd, &info, sizeof(info)) != (ssize_t)sizeof(info)) {
-            perror("send device info");
+            input_net_log_errno(INPUT_NET_LOG_ERROR, "send device info");
             return;
         }
-        printf("Sent device info [%d]: %s\n", i, info.name);
+        input_net_log(INPUT_NET_LOG_INFO, "Sent device info [%d]: %s", i, info.name);
+        input_net_log_device_info(INPUT_NET_LOG_DEBUG, i, &info);
     }
 
     /* One slot per device plus a trailing slot for the socket itself: the
@@ -319,18 +486,19 @@ static inline void input_net_send_devices(const int *dev_fds, int dev_count, int
     pfds[dev_count].events = POLLIN;
 
     int active = dev_count;
+    uint64_t sent_events = 0;
     while (active > 0) {
         int ready = poll(pfds, (nfds_t)(dev_count + 1), -1);
         if (ready < 0) {
             if (errno == EINTR) {
                 continue;
             }
-            perror("poll");
+            input_net_log_errno(INPUT_NET_LOG_ERROR, "poll");
             break;
         }
 
         if (pfds[dev_count].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)) {
-            fprintf(stderr, "peer disconnected\n");
+            input_net_log(INPUT_NET_LOG_INFO, "peer disconnected");
             break;
         }
 
@@ -345,9 +513,9 @@ static inline void input_net_send_devices(const int *dev_fds, int dev_count, int
             ssize_t n = read(pfds[i].fd, &tagged.ev, sizeof(tagged.ev));
             if (n != (ssize_t)sizeof(tagged.ev)) {
                 if (n < 0) {
-                    perror("read input device");
+                    input_net_log_errno(INPUT_NET_LOG_ERROR, "read input device");
                 } else {
-                    fprintf(stderr, "device [%d] closed/short read\n", i);
+                    input_net_log(INPUT_NET_LOG_WARN, "device [%d] closed/short read", i);
                 }
                 pfds[i].fd = -1;
                 active--;
@@ -355,12 +523,19 @@ static inline void input_net_send_devices(const int *dev_fds, int dev_count, int
             }
             if (input_net_write_full(sock_fd, &tagged, sizeof(tagged)) != (ssize_t)sizeof(tagged)) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    fprintf(stderr, "peer stopped reading for %ds, giving up\n",
-                            INPUT_NET_SEND_TIMEOUT);
+                    input_net_log(INPUT_NET_LOG_ERROR, "peer stopped reading for %ds, giving up",
+                                  INPUT_NET_SEND_TIMEOUT);
                 } else {
-                    fprintf(stderr, "peer disconnected: %s\n", strerror(errno));
+                    input_net_log_errno(INPUT_NET_LOG_INFO, "peer disconnected");
                 }
                 stop = 1;
+                continue;
+            }
+            input_net_log_event(INPUT_NET_LOG_TRACE, "sent", i, &tagged.ev);
+            sent_events++;
+            if ((sent_events % INPUT_NET_LOG_EVENT_INTERVAL) == 0) {
+                input_net_log(INPUT_NET_LOG_DEBUG, "forwarded %llu events to peer",
+                              (unsigned long long)sent_events);
             }
         }
         if (stop) {
@@ -387,16 +562,16 @@ static inline int input_net_receive_devices(int sock_fd) {
     struct input_net_stream_header header;
     ssize_t n = input_net_read_full(sock_fd, &header, sizeof(header));
     if (n != (ssize_t)sizeof(header)) {
-        fprintf(stderr, "failed to receive stream header from peer\n");
+        input_net_log(INPUT_NET_LOG_ERROR, "failed to receive stream header from peer");
         return -1;
     }
     if (header.magic != INPUT_NET_MAGIC) {
-        fprintf(stderr, "bad protocol magic from peer (got 0x%08x)\n", header.magic);
+        input_net_log(INPUT_NET_LOG_ERROR, "bad protocol magic from peer (got 0x%08x)", header.magic);
         return -1;
     }
     if (header.device_count == 0 || header.device_count > INPUT_NET_MAX_DEVICES) {
-        fprintf(stderr, "peer announced invalid device count %u\n",
-                (unsigned)header.device_count);
+        input_net_log(INPUT_NET_LOG_ERROR, "peer announced invalid device count %u",
+                      (unsigned)header.device_count);
         return -1;
     }
 
@@ -408,12 +583,13 @@ static inline int input_net_receive_devices(int sock_fd) {
         struct input_net_device_info info;
         ssize_t r = input_net_read_full(sock_fd, &info, sizeof(info));
         if (r != (ssize_t)sizeof(info)) {
-            fprintf(stderr, "failed to receive device info [%d] from peer\n", i);
+            input_net_log(INPUT_NET_LOG_ERROR, "failed to receive device info [%d] from peer", i);
             dev_count = i;
             rc = -1;
             goto cleanup;
         }
         info.name[sizeof(info.name) - 1] = '\0';
+        input_net_log_device_info(INPUT_NET_LOG_DEBUG, i, &info);
 
         uinput_fds[i] = input_net_create_uinput_device(&info);
         if (uinput_fds[i] < 0) {
@@ -423,24 +599,34 @@ static inline int input_net_receive_devices(int sock_fd) {
         }
     }
 
+    input_net_log(INPUT_NET_LOG_DEBUG, "replaying events for %d device(s)", dev_count);
+
+    uint64_t received_events = 0;
     for (;;) {
         struct input_net_tagged_event tagged;
         ssize_t r = input_net_read_full(sock_fd, &tagged, sizeof(tagged));
         if (r == 0) {
-            fprintf(stderr, "peer closed connection\n");
+            input_net_log(INPUT_NET_LOG_INFO, "peer closed connection");
             break;
         }
         if (r < 0) {
-            perror("read from peer");
+            input_net_log_errno(INPUT_NET_LOG_ERROR, "read from peer");
             break;
         }
         if (tagged.device_index >= (uint32_t)dev_count) {
-            fprintf(stderr, "bad device index %u from peer\n", (unsigned)tagged.device_index);
+            input_net_log(INPUT_NET_LOG_ERROR, "bad device index %u from peer",
+                          (unsigned)tagged.device_index);
             break;
         }
         if (write(uinput_fds[tagged.device_index], &tagged.ev, sizeof(tagged.ev)) < 0) {
-            perror("write uinput");
+            input_net_log_errno(INPUT_NET_LOG_ERROR, "write uinput");
             break;
+        }
+        input_net_log_event(INPUT_NET_LOG_TRACE, "replayed", (int)tagged.device_index, &tagged.ev);
+        received_events++;
+        if ((received_events % INPUT_NET_LOG_EVENT_INTERVAL) == 0) {
+            input_net_log(INPUT_NET_LOG_DEBUG, "replayed %llu events from peer",
+                          (unsigned long long)received_events);
         }
     }
 
@@ -472,7 +658,7 @@ static inline int input_net_connect(const char *host, int port) {
     struct addrinfo *result = NULL;
     int gai_rc = getaddrinfo(host, port_str, &hints, &result);
     if (gai_rc != 0) {
-        fprintf(stderr, "failed to resolve %s: %s\n", host, gai_strerror(gai_rc));
+        input_net_log(INPUT_NET_LOG_ERROR, "failed to resolve %s: %s", host, gai_strerror(gai_rc));
         return -1;
     }
 
@@ -492,7 +678,7 @@ static inline int input_net_connect(const char *host, int port) {
     freeaddrinfo(result);
 
     if (sock_fd < 0) {
-        fprintf(stderr, "failed to connect to %s:%d: %s\n", host, port, strerror(errno));
+        input_net_log_errno(INPUT_NET_LOG_ERROR, "failed to connect to %s:%d", host, port);
     }
     return sock_fd;
 }
@@ -503,7 +689,7 @@ static inline int input_net_connect(const char *host, int port) {
 static inline int input_net_listen(int port) {
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
-        perror("socket");
+        input_net_log_errno(INPUT_NET_LOG_ERROR, "socket");
         return -1;
     }
     int reuse = 1;
@@ -516,12 +702,12 @@ static inline int input_net_listen(int port) {
     addr.sin_port = htons((uint16_t)port);
 
     if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("bind");
+        input_net_log_errno(INPUT_NET_LOG_ERROR, "bind");
         close(listen_fd);
         return -1;
     }
     if (listen(listen_fd, 1) < 0) {
-        perror("listen");
+        input_net_log_errno(INPUT_NET_LOG_ERROR, "listen");
         close(listen_fd);
         return -1;
     }

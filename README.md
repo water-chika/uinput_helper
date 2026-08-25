@@ -41,6 +41,10 @@ input_transfer receive --listen [port]                                         #
 input_transfer receive <host> [port]                                           # recreate device(s), connecting to a peer
 ```
 
+Any of these accept `--log-level <level>` (or `-L <level>`) anywhere on
+the command line to control verbosity; `$INPUT_TRANSFER_LOG_LEVEL` sets
+the same thing when no flag is given (an explicit flag wins).
+
 `-d <input-device>` may be repeated (up to 32 times) to share several
 devices over one connection; `receive` needs no device arguments — it
 recreates whatever the peer announces. `port` defaults to `9111`.
@@ -98,6 +102,32 @@ Notes:
   tagged with a device index so devices are multiplexed over the one
   connection.
 
+### Log levels
+
+Every message is tagged with its level (`[info] ...`); errors and
+warnings go to stderr, everything else to stdout. Levels, quietest
+first — each level also logs everything quieter than itself, and may be
+given by name or by number (`0`-`5`):
+
+| Level | What it adds |
+| --- | --- |
+| `quiet` | nothing at all, only the exit status |
+| `error` | failures (connect/bind/open/protocol errors) |
+| `warn` | non-fatal problems (e.g. a failed `EVIOCGRAB`) |
+| `info` | connection and device lifecycle — the default, i.e. the previous behaviour |
+| `debug` | socket settings, each device's announced capabilities and abs ranges, and an event counter every 100 events |
+| `trace` | every single forwarded/replayed event (device index, type, code, value) |
+
+```sh
+input_transfer send -d /dev/input/event3 --listen --log-level debug
+input_transfer receive --listen -L trace     # very loud, debugging only
+INPUT_TRANSFER_LOG_LEVEL=warn input_transfer receive --listen
+```
+
+`trace` writes a line per event on both peers, so it easily floods a
+terminal or the journal during normal mouse movement — prefer `debug`
+unless individual events are what you are after.
+
 ### Running as systemd services
 
 `systemd/` contains ready-to-use unit files to run `input_transfer` as
@@ -113,6 +143,10 @@ a persistent service, restarting on failure/disconnect:
   `$LISTEN_PORT` instead. This way the device list can be edited (and
   the service restarted) without touching the unit file, and doesn't
   depend on shell word-splitting of an environment variable.
+Both `.env` files also carry a commented-out
+`INPUT_TRANSFER_LOG_LEVEL=` line for setting the service's verbosity
+(see "Log levels" above) without editing the unit.
+
 - `input-transfer-receive.service` + `input-transfer-receive.env` —
   runs `input_transfer receive --listen $LISTEN_PORT`, i.e. waits for a
   peer to connect and recreates its device(s) locally (`receive` takes
