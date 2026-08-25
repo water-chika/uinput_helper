@@ -7,7 +7,10 @@
 #include <linux/uinput.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
+#include <signal.h>
+#include <sys/time.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,6 +82,58 @@ struct input_net_tagged_event {
 };
 
 #define INPUT_NET_MAX_DEVICES 32
+
+/* An input stream can legitimately be idle for hours (nobody touching the
+ * device), so a silently broken connection (NAT/conntrack timeout, Wi-Fi
+ * drop, peer machine powered off) is otherwise indistinguishable from
+ * "no input right now": both peers would block forever and the transfer
+ * would appear to stall, with the sender still holding EVIOCGRAB on the
+ * real device. TCP keepalive both keeps middlebox state alive during idle
+ * periods and turns a dead peer into a read/write error within roughly
+ * INPUT_NET_KEEPALIVE_IDLE + INPUT_NET_KEEPALIVE_CNT *
+ * INPUT_NET_KEEPALIVE_INTVL seconds. */
+#define INPUT_NET_KEEPALIVE_IDLE 30
+#define INPUT_NET_KEEPALIVE_INTVL 10
+#define INPUT_NET_KEEPALIVE_CNT 3
+
+/* Upper bound on how long a single write to the peer may block before it
+ * is treated as a failed connection. Only hit if the peer stops draining
+ * the socket entirely, which for an input stream means it is gone. */
+#define INPUT_NET_SEND_TIMEOUT 30
+
+/* Applies the socket options every input_transfer connection wants,
+ * regardless of direction or which side listened: low latency (events are
+ * tiny and latency-sensitive) plus dead-peer detection (see above). */
+static inline void input_net_configure_socket(int sock_fd) {
+    int one = 1;
+    setsockopt(sock_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    setsockopt(sock_fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+
+#ifdef TCP_KEEPIDLE
+    int idle = INPUT_NET_KEEPALIVE_IDLE;
+    setsockopt(sock_fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+#endif
+#ifdef TCP_KEEPINTVL
+    int intvl = INPUT_NET_KEEPALIVE_INTVL;
+    setsockopt(sock_fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+#endif
+#ifdef TCP_KEEPCNT
+    int cnt = INPUT_NET_KEEPALIVE_CNT;
+    setsockopt(sock_fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+#endif
+
+    struct timeval snd_timeout;
+    snd_timeout.tv_sec = INPUT_NET_SEND_TIMEOUT;
+    snd_timeout.tv_usec = 0;
+    setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &snd_timeout, sizeof(snd_timeout));
+}
+
+/* A peer that disappears makes write() raise SIGPIPE, whose default action
+ * kills the process without any diagnostic. Ignoring it turns those writes
+ * into plain EPIPE errors the send/receive loops already handle. */
+static inline void input_net_ignore_sigpipe(void) {
+    signal(SIGPIPE, SIG_IGN);
+}
 
 
 /* Reads exactly len bytes, retrying on EINTR/short reads.
@@ -249,20 +304,33 @@ static inline void input_net_send_devices(const int *dev_fds, int dev_count, int
         printf("Sent device info [%d]: %s\n", i, info.name);
     }
 
-    struct pollfd pfds[INPUT_NET_MAX_DEVICES];
+    /* One slot per device plus a trailing slot for the socket itself: the
+     * peer never sends anything back, so the socket only becomes readable
+     * on EOF/error. Watching it means a peer that goes away while the
+     * devices are idle is noticed right away, instead of only when the
+     * next event happens to be written (which for a device nobody touches
+     * may be never). */
+    struct pollfd pfds[INPUT_NET_MAX_DEVICES + 1];
     for (int i = 0; i < dev_count; i++) {
         pfds[i].fd = dev_fds[i];
         pfds[i].events = POLLIN;
     }
+    pfds[dev_count].fd = sock_fd;
+    pfds[dev_count].events = POLLIN;
 
     int active = dev_count;
     while (active > 0) {
-        int ready = poll(pfds, (nfds_t)dev_count, -1);
+        int ready = poll(pfds, (nfds_t)(dev_count + 1), -1);
         if (ready < 0) {
             if (errno == EINTR) {
                 continue;
             }
             perror("poll");
+            break;
+        }
+
+        if (pfds[dev_count].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)) {
+            fprintf(stderr, "peer disconnected\n");
             break;
         }
 
@@ -286,7 +354,12 @@ static inline void input_net_send_devices(const int *dev_fds, int dev_count, int
                 continue;
             }
             if (input_net_write_full(sock_fd, &tagged, sizeof(tagged)) != (ssize_t)sizeof(tagged)) {
-                fprintf(stderr, "peer disconnected\n");
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    fprintf(stderr, "peer stopped reading for %ds, giving up\n",
+                            INPUT_NET_SEND_TIMEOUT);
+                } else {
+                    fprintf(stderr, "peer disconnected: %s\n", strerror(errno));
+                }
                 stop = 1;
             }
         }

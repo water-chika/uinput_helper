@@ -74,6 +74,19 @@ sudo ./input_transfer send -d /dev/input/event3 -d /dev/input/event4 machine-b.l
 permissions on those device nodes.
 
 Notes:
+- Connections use TCP keepalive (30s idle, 3 probes 10s apart) and
+  `TCP_NODELAY`. An input stream can legitimately be idle for hours, so
+  without keepalive a connection killed silently — NAT/conntrack
+  timeout, Wi-Fi drop, peer powered off — is indistinguishable from
+  "nobody is touching the device", and both sides would block forever
+  (the transfer appearing to stall, with `send` still holding
+  `EVIOCGRAB` on the real device). Keepalive both keeps middlebox state
+  alive while idle and turns a dead peer into an error within about a
+  minute. `send` additionally polls the socket alongside the device
+  nodes, so it notices a peer that vanishes during an idle period
+  immediately (releasing the grabbed device and, in `--listen` mode,
+  going back to waiting for a peer), and gives up on a write that
+  blocks for more than 30s.
 - In `--listen` mode, only one peer is served at a time;
   `input_transfer` accepts a new peer after the previous one
   disconnects.

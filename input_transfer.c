@@ -99,6 +99,8 @@ cleanup:
 }
 
 int main(int argc, char **argv) {
+    input_net_ignore_sigpipe();
+
     if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
         print_usage(stdout, argv[0]);
         return 0;
@@ -189,8 +191,7 @@ int main(int argc, char **argv) {
             }
             printf("Peer connected: %s\n", inet_ntoa(peer_addr.sin_addr));
 
-            int one = 1;
-            setsockopt(peer_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+            input_net_configure_socket(peer_fd);
 
             if (direction == DIRECTION_SEND) {
                 run_send(dev_paths, dev_count, peer_fd);
@@ -208,10 +209,8 @@ int main(int argc, char **argv) {
         if (sock_fd < 0) {
             return 1;
         }
-        int one = 1;
-        setsockopt(sock_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-
         int rc = 0;
+        input_net_configure_socket(sock_fd);
         if (direction == DIRECTION_SEND) {
             printf("Connecting to %s:%d to send %d device(s)\n", host, port, dev_count);
             run_send(dev_paths, dev_count, sock_fd);
