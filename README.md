@@ -8,15 +8,16 @@ Interactively creates a virtual joystick device via `/dev/uinput` and lets
 you drive its axes/buttons from stdin (`x <value>`, `y <value>`,
 `a <0|1>`, `b <0|1>`).
 
-## Emulating two joysticks with a keyboard
+## Emulating joysticks with a keyboard
 
 `keyboard_joystick` reads a real keyboard's evdev node and turns its key
-presses into **two** independent virtual joysticks created via
-`/dev/uinput`, so two players can share one keyboard, or a game that only
-speaks joystick can be driven from the keyboard.
+presses into independent virtual joysticks created via `/dev/uinput`, so
+two players can share one keyboard, or a game that only speaks joystick
+can be driven from the keyboard.
 
 ```sh
-keyboard_joystick -d <keyboard-device> [--grab]
+keyboard_joystick -d <keyboard-device> [--grab] [-c <map-file>]
+                  [-m <joystick>:<key>:<target> ...] [--print-map]
 ```
 
 - `-d, --device <dev>`: the keyboard's event node (e.g.
@@ -25,11 +26,18 @@ keyboard_joystick -d <keyboard-device> [--grab]
 - `-g, --grab`: grab the keyboard exclusively (`EVIOCGRAB`), so its keys
   stop reaching the desktop while this runs. Off by default, i.e. keys
   keep working normally and are only mirrored onto the joysticks.
-- `-h, --help`: show the usage and the full key mapping.
+- `-c, --config <file>`: load the key mapping from a file (see
+  "Configuring the mapping" below), replacing the default mapping.
+- `-m, --map <joystick>:<key>:<target>`: add a single mapping rule,
+  repeatable; also replaces the default mapping.
+- `--print-map`: print the mapping that would be used and exit.
+- `-h, --help`: show the usage, mapping syntax and default mapping.
 
-Both virtual devices ("Keyboard Joystick 1" and "Keyboard Joystick 2")
-expose `ABS_X`/`ABS_Y` (range -512..512, `flat` 30, same as
+Each virtual device ("Keyboard Joystick 1", "Keyboard Joystick 2", ...)
+exposes `ABS_X`/`ABS_Y` (range -512..512, `flat` 30, same as
 `uinput_test`) and `BTN_A`/`BTN_B`/`BTN_X`/`BTN_Y`.
+
+The default mapping drives two joysticks:
 
 | Key (joystick 1) | Key (joystick 2) | Effect |
 | --- | --- | --- |
@@ -47,6 +55,45 @@ destroy the virtual devices and release the grab cleanly.
 
 Needs read access to the keyboard's event node and to `/dev/uinput`
 (i.e. root, or suitable udev permissions).
+
+### Configuring the mapping
+
+A mapping file (`-c`) holds one rule per line, and `-m` takes the same
+three fields separated by `:` instead of whitespace:
+
+```
+<joystick> <key> <target>
+```
+
+- `<joystick>` — joystick number starting at 1 (up to 8). **The highest
+  number used decides how many virtual joysticks are created**, so a
+  four-player layout is just a matter of listing rules for joysticks
+  1 to 4.
+- `<key>` — key name, case-insensitive, with an optional `KEY_` prefix:
+  `W`, `w`, `KEY_W`, `LEFTSHIFT`, `BACKSLASH`, `KP1`, `F1`, ...
+- `<target>` — `UP`, `DOWN`, `LEFT` or `RIGHT` for an axis direction, or
+  a button name `A`, `B`, `X` or `Y` (`BTN_` prefix optional).
+
+Blank lines and `#` comments are ignored. Several keys may drive the
+same target, and one key may drive several targets. A file (or any `-m`
+rule) replaces the built-in mapping entirely, so list every rule you
+want.
+
+`--print-map` writes the effective mapping in exactly this syntax, so it
+doubles as a way to bootstrap a file:
+
+```sh
+keyboard_joystick --print-map > my-layout.conf
+$EDITOR my-layout.conf
+keyboard_joystick -d /dev/input/event3 -c my-layout.conf
+```
+
+`systemd/keyboard-joystick.conf.example` is a ready-made file
+reproducing the default mapping. Quick one-off tweaks need no file:
+
+```sh
+keyboard_joystick -d /dev/input/event3 -m 1:kp8:up -m 1:kp2:down -m 1:space:a
+```
 
 ## Transferring input devices over the network
 
@@ -254,6 +301,10 @@ install -m755 systemd/keyboard-joystick.sh /usr/local/bin/keyboard-joystick.sh
 install -m644 systemd/keyboard-joystick.service /etc/systemd/system/
 install -m600 systemd/keyboard-joystick.env /etc/default/keyboard-joystick
 $EDITOR /etc/default/keyboard-joystick   # KEYBOARD_DEVICE, GRAB, REMOTE_HOST/REMOTE_PORT
+# optional: a custom key mapping instead of the built-in one
+mkdir -p /etc/keyboard-joystick
+install -m644 systemd/keyboard-joystick.conf.example /etc/keyboard-joystick/map.conf
+$EDITOR /etc/keyboard-joystick/map.conf   # then set MAP_FILE= in the env file
 systemctl daemon-reload
 systemctl enable --now keyboard-joystick.service
 ```
@@ -262,6 +313,10 @@ On the machine running the game, run a receiver on the matching port
 (`input-transfer-receive@9112.service` above). Use a port of its own if
 another `input_transfer` pair (e.g. a forwarded mouse) already uses
 9111, so restarting the joysticks doesn't disturb it.
+
+`MAP_FILE` is passed to `keyboard_joystick -c`, and the wrapper asks
+`keyboard_joystick --print-map` how many joysticks that mapping defines,
+so a mapping with more than two joysticks is forwarded as-is.
 
 Point `KEYBOARD_DEVICE` at a `/dev/input/by-id/...-event-kbd` path
 rather than `/dev/input/eventN`, which can change across reboots.

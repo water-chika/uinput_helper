@@ -11,6 +11,9 @@
 # Environment (see /etc/default/keyboard-joystick):
 #   KEYBOARD_DEVICE - keyboard event node to read (required), e.g.
 #                     /dev/input/by-id/usb-...-event-kbd
+#   MAP_FILE        - optional key mapping file (keyboard_joystick -c);
+#                     the built-in default mapping is used if unset or
+#                     if the file does not exist
 #   GRAB=1          - grab the keyboard exclusively, so its keys stop
 #                     reaching the local desktop while playing
 #   LISTEN=1        - listen for a peer instead of connecting out; uses
@@ -19,9 +22,31 @@
 set -e
 
 BIN_DIR="${BIN_DIR:-/usr/local/bin}"
-JOYSTICK_NAMES=("Keyboard Joystick 1" "Keyboard Joystick 2")
 # How long to wait for the virtual devices to appear, in 0.1s steps.
 WAIT_STEPS="${WAIT_STEPS:-50}"
+
+map_args=()
+if [ -n "$MAP_FILE" ]; then
+    if [ -f "$MAP_FILE" ]; then
+        map_args=(-c "$MAP_FILE")
+    else
+        echo "keyboard-joystick: MAP_FILE '$MAP_FILE' not found, using the default mapping" >&2
+    fi
+fi
+
+# Ask keyboard_joystick itself how many joysticks the mapping creates,
+# instead of assuming the default two.
+joystick_count=$("$BIN_DIR/keyboard_joystick" "${map_args[@]}" --print-map |
+    awk '$1 ~ /^[0-9]+$/ { if ($1 > n) n = $1 } END { print n + 0 }')
+if [ "${joystick_count:-0}" -lt 1 ]; then
+    echo "keyboard-joystick: mapping defines no joysticks" >&2
+    exit 1
+fi
+
+JOYSTICK_NAMES=()
+for i in $(seq "$joystick_count"); do
+    JOYSTICK_NAMES+=("Keyboard Joystick $i")
+done
 
 if [ -z "$KEYBOARD_DEVICE" ]; then
     echo "keyboard-joystick: KEYBOARD_DEVICE is not set" >&2
@@ -57,7 +82,7 @@ if [ "${GRAB:-0}" = "1" ]; then
     grab_args=(--grab)
 fi
 
-"$BIN_DIR/keyboard_joystick" -d "$KEYBOARD_DEVICE" "${grab_args[@]}" &
+"$BIN_DIR/keyboard_joystick" -d "$KEYBOARD_DEVICE" "${grab_args[@]}" "${map_args[@]}" &
 kj_pid=$!
 
 nodes=()
