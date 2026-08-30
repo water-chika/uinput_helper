@@ -8,7 +8,8 @@
 #   <key>       key name, case-insensitive, optional KEY_ prefix
 #               (W, w, KEY_W, LEFTSHIFT, BACKSLASH, KP1, F1, ...).
 #   <target>    UP, DOWN, LEFT or RIGHT for an axis direction, or a
-#               button name A, B, X or Y (BTN_ prefix optional).
+#               button name, BTN_ prefix optional: A, B, C, X, Y, Z,
+#               TL, TR, TL2, TR2, SELECT, START, MODE, THUMBL, THUMBR.
 #
 # Blank lines and '#' comments are ignored. Several keys may drive the
 # same target, and one key may drive several targets. A file replaces
@@ -27,12 +28,14 @@
 1 T            X
 1 F            Y
 
-# joystick 2: arrow keys to move, right-hand keys for the buttons
+# joystick 2: arrow keys to move, Ins/Home/PgUp/ScLk/End cluster for the
+# buttons (a diamond around Home, which is the extra START button)
 2 UP           UP
 2 DOWN         DOWN
 2 LEFT         LEFT
 2 RIGHT        RIGHT
-2 BACKSLASH    A
-2 ENTER        B
-2 RIGHTSHIFT   X
-2 RIGHTCTRL    Y
+2 END          A
+2 PAGEUP       B
+2 SCROLLLOCK   X
+2 INSERT       Y
+2 HOME         START

@@ -35,7 +35,10 @@ keyboard_joystick -d <keyboard-device> [--grab] [-c <map-file>]
 
 Each virtual device ("Keyboard Joystick 1", "Keyboard Joystick 2", ...)
 exposes `ABS_X`/`ABS_Y` (range -512..512, `flat` 30, same as
-`uinput_test`) and `BTN_A`/`BTN_B`/`BTN_X`/`BTN_Y`.
+`uinput_test`) and the full gamepad button set (`BTN_A`, `BTN_B`,
+`BTN_C`, `BTN_X`, `BTN_Y`, `BTN_Z`, `BTN_TL`, `BTN_TR`, `BTN_TL2`,
+`BTN_TR2`, `BTN_SELECT`, `BTN_START`, `BTN_MODE`, `BTN_THUMBL`,
+`BTN_THUMBR`).
 
 The default mapping drives two joysticks:
 
@@ -43,10 +46,15 @@ The default mapping drives two joysticks:
 | --- | --- | --- |
 | `W` / `S` | `Up` / `Down` | `ABS_Y` -512 / +512 |
 | `A` / `D` | `Left` / `Right` | `ABS_X` -512 / +512 |
-| `G` | `\` | `BTN_A` (south) |
-| `H` | `Enter` | `BTN_B` (east) |
-| `T` | `Right Shift` | `BTN_X` (north) |
-| `F` | `Right Ctrl` | `BTN_Y` (west) |
+| `G` | `End` | `BTN_A` (south) |
+| `H` | `Page Up` | `BTN_B` (east) |
+| `T` | `Scroll Lock` | `BTN_X` (north) |
+| `F` | `Insert` | `BTN_Y` (west) |
+| — | `Home` | `BTN_START` |
+
+Both button sets are physical diamonds around the movement keys —
+`T`/`F`/`G`/`H` next to `WASD`, and `ScLk`/`Ins`/`PgUp`/`End` around
+`Home` next to the arrow keys.
 
 Holding both directions of an axis cancels out (the axis returns to 0),
 key auto-repeat is ignored, and all changes belonging to one keyboard
@@ -72,7 +80,10 @@ three fields separated by `:` instead of whitespace:
 - `<key>` — key name, case-insensitive, with an optional `KEY_` prefix:
   `W`, `w`, `KEY_W`, `LEFTSHIFT`, `BACKSLASH`, `KP1`, `F1`, ...
 - `<target>` — `UP`, `DOWN`, `LEFT` or `RIGHT` for an axis direction, or
-  a button name `A`, `B`, `X` or `Y` (`BTN_` prefix optional).
+  a button name (`BTN_` prefix optional): `A`, `B`, `C`, `X`, `Y`, `Z`,
+  `TL`, `TR`, `TL2`, `TR2`, `SELECT`, `START`, `MODE`, `THUMBL`,
+  `THUMBR`. Every joystick exposes all of them, so a mapping can use any
+  button without reconfiguring the device.
 
 Blank lines and `#` comments are ignored. Several keys may drive the
 same target, and one key may drive several targets. A file (or any `-m`

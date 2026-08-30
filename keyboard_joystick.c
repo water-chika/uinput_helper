@@ -13,8 +13,9 @@
  * The built-in default mapping drives two joysticks:
  *   Joystick 1: W/A/S/D axes, buttons in the T/F/G/H diamond:
  *               G (A / south), H (B / east), T (X / north), F (Y / west)
- *   Joystick 2: arrow keys axes, buttons \ (A), Enter (B),
- *               Right Shift (X), Right Ctrl (Y)
+ *   Joystick 2: arrow keys axes, buttons in the Ins/Home/PgUp/ScLk/End
+ *               cluster: End (A / south), PgUp (B / east),
+ *               ScrollLock (X / north), Insert (Y / west), Home (START)
  *
  * It can be replaced entirely by a mapping file (-c) and/or individual
  * -m rules; see parse_mapping() for the syntax and --print-map to dump
@@ -87,10 +88,11 @@ static const struct key_mapping default_mappings[] = {
     {KEY_DOWN, 1, MAP_AXIS, ABS_Y, +1, "DOWN"},
     {KEY_LEFT, 1, MAP_AXIS, ABS_X, -1, "LEFT"},
     {KEY_RIGHT, 1, MAP_AXIS, ABS_X, +1, "RIGHT"},
-    {KEY_BACKSLASH, 1, MAP_BUTTON, BTN_A, 0, "BACKSLASH"},
-    {KEY_ENTER, 1, MAP_BUTTON, BTN_B, 0, "ENTER"},
-    {KEY_RIGHTSHIFT, 1, MAP_BUTTON, BTN_X, 0, "RIGHTSHIFT"},
-    {KEY_RIGHTCTRL, 1, MAP_BUTTON, BTN_Y, 0, "RIGHTCTRL"},
+    {KEY_END, 1, MAP_BUTTON, BTN_A, 0, "END"},
+    {KEY_PAGEUP, 1, MAP_BUTTON, BTN_B, 0, "PAGEUP"},
+    {KEY_SCROLLLOCK, 1, MAP_BUTTON, BTN_X, 0, "SCROLLLOCK"},
+    {KEY_INSERT, 1, MAP_BUTTON, BTN_Y, 0, "INSERT"},
+    {KEY_HOME, 1, MAP_BUTTON, BTN_START, 0, "HOME"},
 };
 
 #define DEFAULT_MAPPING_COUNT ((int)(sizeof(default_mappings) / sizeof(default_mappings[0])))
@@ -138,6 +140,8 @@ static const struct name_code key_names[] = {
     {"GRAVE", KEY_GRAVE}, {"COMMA", KEY_COMMA}, {"DOT", KEY_DOT},
     {"SLASH", KEY_SLASH},
 
+    {"SCROLLLOCK", KEY_SCROLLLOCK}, {"SYSRQ", KEY_SYSRQ}, {"PAUSE", KEY_PAUSE},
+
     {"INSERT", KEY_INSERT}, {"DELETE", KEY_DELETE}, {"HOME", KEY_HOME},
     {"END", KEY_END}, {"PAGEUP", KEY_PAGEUP}, {"PAGEDOWN", KEY_PAGEDOWN},
 
@@ -151,9 +155,15 @@ static const struct name_code key_names[] = {
 
 #define KEY_NAME_COUNT ((int)(sizeof(key_names) / sizeof(key_names[0])))
 
-/* Buttons a virtual joystick exposes, and the names accepted for them. */
+/* Buttons a virtual joystick exposes, and the names accepted for them.
+ * The whole gamepad set is created on every joystick so a mapping can
+ * use any of them without the device having to be reconfigured. */
 static const struct name_code button_names[] = {
-    {"A", BTN_A}, {"B", BTN_B}, {"X", BTN_X}, {"Y", BTN_Y},
+    {"A", BTN_A}, {"B", BTN_B}, {"C", BTN_C},
+    {"X", BTN_X}, {"Y", BTN_Y}, {"Z", BTN_Z},
+    {"TL", BTN_TL}, {"TR", BTN_TR}, {"TL2", BTN_TL2}, {"TR2", BTN_TR2},
+    {"SELECT", BTN_SELECT}, {"START", BTN_START}, {"MODE", BTN_MODE},
+    {"THUMBL", BTN_THUMBL}, {"THUMBR", BTN_THUMBR},
 };
 
 #define BUTTON_COUNT ((int)(sizeof(button_names) / sizeof(button_names[0])))
@@ -266,7 +276,11 @@ static void print_usage(FILE *out, const char *prog) {
     fprintf(out, "    <key>:      key name, case-insensitive, with an optional KEY_ prefix\n");
     fprintf(out, "                (e.g. W, w, KEY_W, LEFTSHIFT, KP1, BACKSLASH, F1).\n");
     fprintf(out, "    <target>:   UP, DOWN, LEFT or RIGHT for an axis direction, or a button\n");
-    fprintf(out, "                name A, B, X or Y (BTN_ prefix optional).\n");
+    fprintf(out, "                name (BTN_ prefix optional):");
+    for (int i = 0; i < BUTTON_COUNT; i++) {
+        fprintf(out, "%s%s", (i % 6 == 0) ? "\n                  " : " ", button_names[i].name);
+    }
+    fprintf(out, "\n");
     fprintf(out, "  Blank lines and lines starting with '#' are ignored.\n");
     fprintf(out, "  Several keys may drive the same target, and one key may drive several\n");
     fprintf(out, "  targets.\n");
@@ -328,7 +342,8 @@ static int add_mapping(const char *joystick_field, const char *key_field, const 
         int button = lookup_name(button_names, BUTTON_COUNT, target);
         if (button < 0) {
             fprintf(stderr,
-                    "%s: unknown target '%s' (expected UP/DOWN/LEFT/RIGHT or button A/B/X/Y)\n",
+                    "%s: unknown target '%s' (expected UP/DOWN/LEFT/RIGHT or a button name; "
+                    "see --help)\n",
                     where, target_field);
             return -1;
         }
