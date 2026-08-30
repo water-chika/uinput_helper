@@ -18,6 +18,7 @@ can be driven from the keyboard.
 ```sh
 keyboard_joystick -d <keyboard-device> [--grab] [-c <map-file>]
                   [-m <joystick>:<key>:<target> ...] [--print-map]
+                  [--node-file <file>]
 ```
 
 - `-d, --device <dev>`: the keyboard's event node (e.g.
@@ -31,30 +32,42 @@ keyboard_joystick -d <keyboard-device> [--grab] [-c <map-file>]
 - `-m, --map <joystick>:<key>:<target>`: add a single mapping rule,
   repeatable; also replaces the default mapping.
 - `--print-map`: print the mapping that would be used and exit.
+- `--node-file <file>`: once every joystick exists, write one
+  `<joystick> /dev/input/eventN` line per joystick to `<file>` (written
+  atomically via a temporary and a rename). All the pads share a single
+  device name, so this is how a script tells them apart.
 - `-h, --help`: show the usage, mapping syntax and default mapping.
 
-Each virtual device ("Keyboard Joystick 1", "Keyboard Joystick 2", ...)
-exposes `ABS_X`/`ABS_Y` (range -512..512, `flat` 30, same as
-`uinput_test`) and the full gamepad button set (`BTN_A`, `BTN_B`,
-`BTN_C`, `BTN_X`, `BTN_Y`, `BTN_Z`, `BTN_TL`, `BTN_TR`, `BTN_TL2`,
-`BTN_TR2`, `BTN_SELECT`, `BTN_START`, `BTN_MODE`, `BTN_THUMBL`,
-`BTN_THUMBR`).
+Each virtual device impersonates a **wired Xbox 360 controller**: the
+same device name (`Microsoft X-Box 360 pad`), USB ids (`045e:028e`,
+version `0114`) and exact axis/button layout the kernel's `xpad` driver
+exposes. SDL, Steam and anything else that recognises gamepads by their
+identity therefore apply their built-in Xbox mapping, so `A`/`B`/`X`/`Y`
+below are the letters printed on an Xbox pad and shown in games — no
+per-game controller configuration needed.
+
+The axes are `ABS_X`/`ABS_Y` (left stick), `ABS_RX`/`ABS_RY` (right
+stick), all -32768..32767 with `flat` 128; `ABS_HAT0X`/`ABS_HAT0Y`
+(d-pad, -1..1); and `ABS_Z`/`ABS_RZ` (analogue triggers, 0..255). The
+buttons are `BTN_A`, `BTN_B`, `BTN_X`, `BTN_Y`, `BTN_TL`, `BTN_TR`,
+`BTN_SELECT`, `BTN_START`, `BTN_MODE`, `BTN_THUMBL` and `BTN_THUMBR`.
 
 The default mapping drives two joysticks:
 
 | Key (joystick 1) | Key (joystick 2) | Effect |
 | --- | --- | --- |
-| `W` / `S` | `Up` / `Down` | `ABS_Y` -512 / +512 |
-| `A` / `D` | `Left` / `Right` | `ABS_X` -512 / +512 |
-| `G` | `End` | `BTN_A` (south) |
-| `H` | `Page Up` | `BTN_B` (east) |
-| `T` | `Scroll Lock` | `BTN_X` (north) |
-| `F` | `Insert` | `BTN_Y` (west) |
+| `W` / `S` | `Up` / `Down` | left stick `ABS_Y` -32768 / +32767 |
+| `A` / `D` | `Left` / `Right` | left stick `ABS_X` -32768 / +32767 |
+| `G` | `End` | `BTN_A` (bottom) |
+| `H` | `Page Up` | `BTN_B` (right) |
+| `F` | `Insert` | `BTN_X` (left) |
+| `T` | `Scroll Lock` | `BTN_Y` (top) |
 | — | `Home` | `BTN_START` |
 
 Both button sets are physical diamonds around the movement keys —
 `T`/`F`/`G`/`H` next to `WASD`, and `ScLk`/`Ins`/`PgUp`/`End` around
-`Home` next to the arrow keys.
+`Home` next to the arrow keys — and each key sits where the Xbox button
+it produces sits on a real pad.
 
 Holding both directions of an axis cancels out (the axis returns to 0),
 key auto-repeat is ignored, and all changes belonging to one keyboard
@@ -79,11 +92,16 @@ three fields separated by `:` instead of whitespace:
   1 to 4.
 - `<key>` — key name, case-insensitive, with an optional `KEY_` prefix:
   `W`, `w`, `KEY_W`, `LEFTSHIFT`, `BACKSLASH`, `KP1`, `F1`, ...
-- `<target>` — `UP`, `DOWN`, `LEFT` or `RIGHT` for an axis direction, or
-  a button name (`BTN_` prefix optional): `A`, `B`, `C`, `X`, `Y`, `Z`,
-  `TL`, `TR`, `TL2`, `TR2`, `SELECT`, `START`, `MODE`, `THUMBL`,
-  `THUMBR`. Every joystick exposes all of them, so a mapping can use any
-  button without reconfiguring the device.
+- `<target>` — an axis direction or a button, case-insensitive. The axis
+  directions are `LEFT`/`RIGHT`/`UP`/`DOWN` for the left stick (also
+  spelled `LLEFT`/`LRIGHT`/`LUP`/`LDOWN`), `RLEFT`/`RRIGHT`/`RUP`/`RDOWN`
+  for the right stick, `DPLEFT`/`DPRIGHT`/`DPUP`/`DPDOWN` for the d-pad,
+  and `LT`/`RT` (or `TL2`/`TR2`) for the analogue triggers. The buttons
+  are `A`, `B`, `X`, `Y`, `TL`, `TR`, `SELECT`, `START`, `MODE`,
+  `THUMBL` and `THUMBR`, with an optional `BTN_` prefix; `LB`, `RB`,
+  `BACK`, `GUIDE`, `LS` and `RS` are accepted as aliases. Every joystick
+  exposes all of them, so a mapping can use any of them without
+  reconfiguring the device.
 
 Blank lines and `#` comments are ignored. Several keys may drive the
 same target, and one key may drive several targets. A file (or any `-m`
@@ -300,9 +318,15 @@ systemctl enable --now input-transfer-receive@9112.service   # listens on 9112
 
 `systemd/keyboard-joystick.{service,env,sh}` combine
 `keyboard_joystick` and `input_transfer send` into one service: it
-turns a local keyboard into the two virtual joysticks, waits for both
-to appear, and forwards them to the machine running the game. If either
-half dies the wrapper exits so systemd restarts the pair together.
+turns a local keyboard into the two virtual Xbox 360 pads, waits for
+`keyboard_joystick` to report their event nodes (`--node-file`, since
+both pads carry the same device name), and forwards them to the machine
+running the game. If either half dies the wrapper exits so systemd
+restarts the pair together.
+
+On the machine running the game the forwarded devices keep the Xbox
+identity — `input_transfer` copies the name, USB ids and axis ranges —
+so Steam and SDL see two ordinary Xbox 360 controllers.
 
 On the machine with the keyboard:
 

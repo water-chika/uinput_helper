@@ -1,5 +1,9 @@
 # Example keyboard_joystick mapping file (keyboard_joystick -c <file>).
 #
+# Every virtual joystick presents itself as a wired Xbox 360 controller,
+# so the A/B/X/Y names below are the letters printed on an Xbox pad and
+# shown by SDL, Steam and games.
+#
 # One rule per line:
 #   <joystick> <key> <target>
 #
@@ -7,9 +11,14 @@
 #               decides how many virtual joysticks are created.
 #   <key>       key name, case-insensitive, optional KEY_ prefix
 #               (W, w, KEY_W, LEFTSHIFT, BACKSLASH, KP1, F1, ...).
-#   <target>    UP, DOWN, LEFT or RIGHT for an axis direction, or a
-#               button name, BTN_ prefix optional: A, B, C, X, Y, Z,
-#               TL, TR, TL2, TR2, SELECT, START, MODE, THUMBL, THUMBR.
+#   <target>    an axis direction:
+#                 LEFT RIGHT UP DOWN            left stick
+#                 RLEFT RRIGHT RUP RDOWN        right stick
+#                 DPLEFT DPRIGHT DPUP DPDOWN    d-pad
+#                 LT RT                         analogue triggers
+#               or a button, BTN_ prefix optional:
+#                 A B X Y TL TR SELECT START MODE THUMBL THUMBR
+#               (LB, RB, BACK, GUIDE, LS and RS are accepted too).
 #
 # Blank lines and '#' comments are ignored. Several keys may drive the
 # same target, and one key may drive several targets. A file replaces
@@ -18,24 +27,25 @@
 # This example reproduces the built-in default mapping; dump the
 # effective one at any time with "keyboard_joystick --print-map".
 
-# joystick 1: WASD to move, T/F/G/H diamond for the buttons
+# joystick 1: WASD to move, T/F/G/H diamond laid out like the face
+# buttons of an Xbox pad (T on top is Y, F on the left is X)
 1 W            UP
 1 S            DOWN
 1 A            LEFT
 1 D            RIGHT
 1 G            A
 1 H            B
-1 T            X
-1 F            Y
+1 F            X
+1 T            Y
 
 # joystick 2: arrow keys to move, Ins/Home/PgUp/ScLk/End cluster for the
-# buttons (a diamond around Home, which is the extra START button)
+# buttons, in the same diamond around Home, which is the START button
 2 UP           UP
 2 DOWN         DOWN
 2 LEFT         LEFT
 2 RIGHT        RIGHT
 2 END          A
 2 PAGEUP       B
-2 SCROLLLOCK   X
-2 INSERT       Y
+2 INSERT       X
+2 SCROLLLOCK   Y
 2 HOME         START

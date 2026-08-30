@@ -1,10 +1,10 @@
 #!/bin/bash
 # Wrapper for keyboard-joystick.service: turns a local keyboard into two
-# virtual joysticks (keyboard_joystick) and forwards both of them to a
-# peer with input_transfer, as one unit.
+# virtual Xbox 360 pads (keyboard_joystick) and forwards both of them to
+# a peer with input_transfer, as one unit.
 #
-# It starts keyboard_joystick, waits for its two virtual devices to show
-# up in /dev/input, then runs "input_transfer send" on them. If either
+# It starts keyboard_joystick, waits for it to report the event nodes of
+# its virtual pads, then runs "input_transfer send" on them. If either
 # process exits, the other is stopped too, so systemd can restart the
 # pair cleanly.
 #
@@ -43,28 +43,14 @@ if [ "${joystick_count:-0}" -lt 1 ]; then
     exit 1
 fi
 
-JOYSTICK_NAMES=()
-for i in $(seq "$joystick_count"); do
-    JOYSTICK_NAMES+=("Keyboard Joystick $i")
-done
-
 if [ -z "$KEYBOARD_DEVICE" ]; then
     echo "keyboard-joystick: KEYBOARD_DEVICE is not set" >&2
     exit 1
 fi
 
-# Prints the /dev/input/eventN node of the virtual device called $1, if any.
-find_device_node() {
-    local wanted="$1" sysdev name
-    for sysdev in /sys/class/input/event*; do
-        name=$(cat "$sysdev/device/name" 2>/dev/null) || continue
-        if [ "$name" = "$wanted" ]; then
-            echo "/dev/input/$(basename "$sysdev")"
-            return 0
-        fi
-    done
-    return 1
-}
+# All virtual pads share one device name (they impersonate the same
+# model), so keyboard_joystick reports their event nodes here instead.
+node_file=$(mktemp /tmp/keyboard-joystick-nodes.XXXXXX)
 
 kj_pid=""
 transfer_pid=""
@@ -73,6 +59,7 @@ cleanup() {
     trap - TERM INT EXIT
     [ -n "$transfer_pid" ] && kill "$transfer_pid" 2>/dev/null
     [ -n "$kj_pid" ] && kill "$kj_pid" 2>/dev/null
+    rm -f "$node_file"
     wait 2>/dev/null
 }
 trap cleanup TERM INT EXIT
@@ -82,30 +69,31 @@ if [ "${GRAB:-0}" = "1" ]; then
     grab_args=(--grab)
 fi
 
-"$BIN_DIR/keyboard_joystick" -d "$KEYBOARD_DEVICE" "${grab_args[@]}" "${map_args[@]}" &
+"$BIN_DIR/keyboard_joystick" -d "$KEYBOARD_DEVICE" "${grab_args[@]}" "${map_args[@]}" \
+    --node-file "$node_file" &
 kj_pid=$!
 
-nodes=()
-for name in "${JOYSTICK_NAMES[@]}"; do
-    node=""
-    for _ in $(seq "$WAIT_STEPS"); do
-        if ! kill -0 "$kj_pid" 2>/dev/null; then
-            echo "keyboard-joystick: keyboard_joystick exited before creating '$name'" >&2
-            exit 1
-        fi
-        if node=$(find_device_node "$name"); then
-            break
-        fi
-        node=""
-        sleep 0.1
-    done
-    if [ -z "$node" ]; then
-        echo "keyboard-joystick: timed out waiting for virtual device '$name'" >&2
+for _ in $(seq "$WAIT_STEPS"); do
+    if ! kill -0 "$kj_pid" 2>/dev/null; then
+        echo "keyboard-joystick: keyboard_joystick exited before creating its devices" >&2
         exit 1
     fi
-    echo "keyboard-joystick: '$name' is $node"
-    nodes+=(-d "$node")
+    if [ "$(wc -l < "$node_file")" -ge "$joystick_count" ]; then
+        break
+    fi
+    sleep 0.1
 done
+
+if [ "$(wc -l < "$node_file")" -lt "$joystick_count" ]; then
+    echo "keyboard-joystick: timed out waiting for $joystick_count virtual device(s)" >&2
+    exit 1
+fi
+
+nodes=()
+while read -r index node; do
+    echo "keyboard-joystick: joystick $index is $node"
+    nodes+=(-d "$node")
+done < "$node_file"
 
 if [ "${LISTEN:-0}" = "1" ]; then
     "$BIN_DIR/input_transfer" send "${nodes[@]}" --listen ${LISTEN_PORT:+"$LISTEN_PORT"} &

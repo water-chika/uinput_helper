@@ -3,6 +3,7 @@
  * Usage:
  *   keyboard_joystick -d <keyboard-device> [--grab] [-c <map-file>]
  *                     [-m <joystick>:<key>:<target> ...] [--print-map]
+ *                     [--node-file <file>]
  *
  * Reads key events from a keyboard's evdev node (e.g. /dev/input/event3,
  * see /proc/bus/input/devices or run input_dump) and translates them into
@@ -10,12 +11,21 @@
  * can share one keyboard, or a single game that only speaks joystick can
  * be driven from the keyboard.
  *
+ * Each virtual joystick presents itself as a wired Xbox 360 controller:
+ * same device name, USB vendor/product id and axis/button layout the
+ * kernel's xpad driver exposes. SDL, Steam and everything else that
+ * recognises gamepads by their identity therefore apply their built-in
+ * Xbox mapping, so the A/B/X/Y names used below are exactly the letters
+ * printed on an Xbox pad and shown in games.
+ *
  * The built-in default mapping drives two joysticks:
- *   Joystick 1: W/A/S/D axes, buttons in the T/F/G/H diamond:
- *               G (A / south), H (B / east), T (X / north), F (Y / west)
- *   Joystick 2: arrow keys axes, buttons in the Ins/Home/PgUp/ScLk/End
- *               cluster: End (A / south), PgUp (B / east),
- *               ScrollLock (X / north), Insert (Y / west), Home (START)
+ *   Joystick 1: W/A/S/D on the left stick, buttons in the T/F/G/H
+ *               diamond, laid out like an Xbox pad's face buttons:
+ *               T (Y / top), F (X / left), G (A / bottom), H (B / right)
+ *   Joystick 2: arrow keys on the left stick, buttons in the
+ *               Ins/Home/PgUp/ScLk/End cluster: ScrollLock (Y / top),
+ *               Insert (X / left), End (A / bottom), PgUp (B / right),
+ *               Home (START)
  *
  * It can be replaced entirely by a mapping file (-c) and/or individual
  * -m rules; see parse_mapping() for the syntax and --print-map to dump
@@ -32,9 +42,11 @@
  * (i.e. root, or suitable udev permissions).
  */
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/input.h>
+#include <limits.h>
 #include <linux/uinput.h>
 #include <poll.h>
 #include <signal.h>
@@ -48,50 +60,91 @@
 #define MAX_MAPPINGS 256
 #define MAX_LABEL 24
 
-/* Full-deflection value reported on ABS_X/ABS_Y; matches uinput_test's
- * -512..512 range so both tools look alike to applications. */
-#define AXIS_MAX 512
-#define AXIS_FLAT 30
+/* Identity of a wired Xbox 360 controller, as the kernel's xpad driver
+ * reports it. Keeping these exact makes SDL/Steam recognise the virtual
+ * device as a known gamepad and apply the standard Xbox mapping. */
+#define XPAD_NAME "Microsoft X-Box 360 pad"
+#define XPAD_VENDOR 0x045e
+#define XPAD_PRODUCT 0x028e
+#define XPAD_VERSION 0x0114
 
 enum mapping_kind {
     MAP_AXIS,
     MAP_BUTTON,
 };
 
+/* One absolute axis of the emulated pad. A key mapped to an axis drives
+ * it to "min" or "max"; releasing it (or holding the opposite key too)
+ * returns it to the rest position 0. Ranges match xpad's. */
+struct axis_desc {
+    int code;
+    int min;
+    int max;
+    int fuzz;
+    int flat;
+};
+
+/* Order matters: mapping rules store the index into this table. */
+static const struct axis_desc axes[] = {
+    {ABS_X, -32768, 32767, 16, 128},   /* 0: left stick horizontal  */
+    {ABS_Y, -32768, 32767, 16, 128},   /* 1: left stick vertical    */
+    {ABS_RX, -32768, 32767, 16, 128},  /* 2: right stick horizontal */
+    {ABS_RY, -32768, 32767, 16, 128},  /* 3: right stick vertical   */
+    {ABS_HAT0X, -1, 1, 0, 0},          /* 4: d-pad horizontal       */
+    {ABS_HAT0Y, -1, 1, 0, 0},          /* 5: d-pad vertical         */
+    {ABS_Z, 0, 255, 0, 0},             /* 6: left trigger           */
+    {ABS_RZ, 0, 255, 0, 0},            /* 7: right trigger          */
+};
+
+#define AXIS_COUNT ((int)(sizeof(axes) / sizeof(axes[0])))
+
+/* Names accepted for an axis direction. The first entry for a given
+ * axis/direction pair is the canonical one --print-map emits. */
+struct axis_dir_name {
+    const char *name;
+    int axis;
+    int dir; /* -1 drives the axis to its minimum, +1 to its maximum */
+};
+
+static const struct axis_dir_name axis_dir_names[] = {
+    {"LEFT", 0, -1},     {"RIGHT", 0, +1},    {"UP", 1, -1},      {"DOWN", 1, +1},
+    {"LLEFT", 0, -1},    {"LRIGHT", 0, +1},   {"LUP", 1, -1},     {"LDOWN", 1, +1},
+    {"RLEFT", 2, -1},    {"RRIGHT", 2, +1},   {"RUP", 3, -1},     {"RDOWN", 3, +1},
+    {"DPLEFT", 4, -1},   {"DPRIGHT", 4, +1},  {"DPUP", 5, -1},    {"DPDOWN", 5, +1},
+    {"LT", 6, +1},       {"RT", 7, +1},       {"TL2", 6, +1},     {"TR2", 7, +1},
+};
+
+#define AXIS_DIR_NAME_COUNT ((int)(sizeof(axis_dir_names) / sizeof(axis_dir_names[0])))
+
 struct key_mapping {
     int key;              /* KEY_* code coming from the real keyboard */
     int joystick;         /* 0-based index of the virtual joystick it drives */
     enum mapping_kind kind;
-    int code;             /* ABS_* for MAP_AXIS, BTN_* for MAP_BUTTON */
+    int code;             /* index into axes[] for MAP_AXIS, BTN_* for MAP_BUTTON */
     int direction;        /* MAP_AXIS only: -1 or +1 */
     char label[MAX_LABEL]; /* key name, for --help/--print-map/startup log */
 };
 
-/* Axis index within a joystick's state, so an axis' two keys can be
- * tracked independently and cancel each other out when held together. */
-#define AXIS_INDEX_X 0
-#define AXIS_INDEX_Y 1
-
 static const struct key_mapping default_mappings[] = {
     /* Joystick 1 */
-    {KEY_W, 0, MAP_AXIS, ABS_Y, -1, "W"},
-    {KEY_S, 0, MAP_AXIS, ABS_Y, +1, "S"},
-    {KEY_A, 0, MAP_AXIS, ABS_X, -1, "A"},
-    {KEY_D, 0, MAP_AXIS, ABS_X, +1, "D"},
+    {KEY_W, 0, MAP_AXIS, 1, -1, "W"},
+    {KEY_S, 0, MAP_AXIS, 1, +1, "S"},
+    {KEY_A, 0, MAP_AXIS, 0, -1, "A"},
+    {KEY_D, 0, MAP_AXIS, 0, +1, "D"},
     {KEY_G, 0, MAP_BUTTON, BTN_A, 0, "G"},
     {KEY_H, 0, MAP_BUTTON, BTN_B, 0, "H"},
-    {KEY_T, 0, MAP_BUTTON, BTN_X, 0, "T"},
-    {KEY_F, 0, MAP_BUTTON, BTN_Y, 0, "F"},
+    {KEY_F, 0, MAP_BUTTON, BTN_X, 0, "F"},
+    {KEY_T, 0, MAP_BUTTON, BTN_Y, 0, "T"},
 
     /* Joystick 2 */
-    {KEY_UP, 1, MAP_AXIS, ABS_Y, -1, "UP"},
-    {KEY_DOWN, 1, MAP_AXIS, ABS_Y, +1, "DOWN"},
-    {KEY_LEFT, 1, MAP_AXIS, ABS_X, -1, "LEFT"},
-    {KEY_RIGHT, 1, MAP_AXIS, ABS_X, +1, "RIGHT"},
+    {KEY_UP, 1, MAP_AXIS, 1, -1, "UP"},
+    {KEY_DOWN, 1, MAP_AXIS, 1, +1, "DOWN"},
+    {KEY_LEFT, 1, MAP_AXIS, 0, -1, "LEFT"},
+    {KEY_RIGHT, 1, MAP_AXIS, 0, +1, "RIGHT"},
     {KEY_END, 1, MAP_BUTTON, BTN_A, 0, "END"},
     {KEY_PAGEUP, 1, MAP_BUTTON, BTN_B, 0, "PAGEUP"},
-    {KEY_SCROLLLOCK, 1, MAP_BUTTON, BTN_X, 0, "SCROLLLOCK"},
-    {KEY_INSERT, 1, MAP_BUTTON, BTN_Y, 0, "INSERT"},
+    {KEY_INSERT, 1, MAP_BUTTON, BTN_X, 0, "INSERT"},
+    {KEY_SCROLLLOCK, 1, MAP_BUTTON, BTN_Y, 0, "SCROLLLOCK"},
     {KEY_HOME, 1, MAP_BUTTON, BTN_START, 0, "HOME"},
 };
 
@@ -102,6 +155,9 @@ static const struct key_mapping default_mappings[] = {
 static struct key_mapping mappings[MAX_MAPPINGS];
 static int mapping_count;
 static int joystick_count;
+
+/* /dev/input/eventN node of each created joystick, in creation order. */
+static char joystick_nodes[MAX_JOYSTICKS][64];
 
 struct name_code {
     const char *name;
@@ -155,24 +211,34 @@ static const struct name_code key_names[] = {
 
 #define KEY_NAME_COUNT ((int)(sizeof(key_names) / sizeof(key_names[0])))
 
-/* Buttons a virtual joystick exposes, and the names accepted for them.
- * The whole gamepad set is created on every joystick so a mapping can
- * use any of them without the device having to be reconfigured. */
+/* Buttons the emulated pad exposes: exactly xpad's set, in xpad's own
+ * naming, so the letters here are the letters on an Xbox pad. The
+ * shoulder triggers are analogue axes (LT/RT), not buttons, as on a
+ * real 360 pad. */
 static const struct name_code button_names[] = {
-    {"A", BTN_A}, {"B", BTN_B}, {"C", BTN_C},
-    {"X", BTN_X}, {"Y", BTN_Y}, {"Z", BTN_Z},
-    {"TL", BTN_TL}, {"TR", BTN_TR}, {"TL2", BTN_TL2}, {"TR2", BTN_TR2},
+    {"A", BTN_A}, {"B", BTN_B}, {"X", BTN_X}, {"Y", BTN_Y},
+    {"TL", BTN_TL}, {"TR", BTN_TR},
     {"SELECT", BTN_SELECT}, {"START", BTN_START}, {"MODE", BTN_MODE},
     {"THUMBL", BTN_THUMBL}, {"THUMBR", BTN_THUMBR},
 };
 
 #define BUTTON_COUNT ((int)(sizeof(button_names) / sizeof(button_names[0])))
 
+/* Extra spellings accepted for the same buttons, for people who think in
+ * Xbox rather than evdev terms. Not printed by --print-map. */
+static const struct name_code button_aliases[] = {
+    {"LB", BTN_TL}, {"RB", BTN_TR},
+    {"BACK", BTN_SELECT}, {"GUIDE", BTN_MODE},
+    {"LS", BTN_THUMBL}, {"RS", BTN_THUMBR},
+};
+
+#define BUTTON_ALIAS_COUNT ((int)(sizeof(button_aliases) / sizeof(button_aliases[0])))
+
 struct joystick {
     int fd;
     /* [axis][0] = negative key held, [axis][1] = positive key held */
-    int axis_keys[2][2];
-    int axis_value[2];
+    int axis_keys[AXIS_COUNT][2];
+    int axis_value[AXIS_COUNT];
     int dirty;
 };
 
@@ -223,6 +289,16 @@ static const char *button_name(int code) {
     return "?";
 }
 
+/* Canonical name of an axis direction: the first spelling listed for it. */
+static const char *axis_dir_name(int axis, int dir) {
+    for (int i = 0; i < AXIS_DIR_NAME_COUNT; i++) {
+        if (axis_dir_names[i].axis == axis && axis_dir_names[i].dir == dir) {
+            return axis_dir_names[i].name;
+        }
+    }
+    return "?";
+}
+
 /* Prints the mapping in the same syntax mapping files use, so
  * --print-map output can be saved and fed back with -c. */
 static void print_mapping(FILE *out, const struct key_mapping *maps, int count, int joysticks,
@@ -234,16 +310,8 @@ static void print_mapping(FILE *out, const struct key_mapping *maps, int count, 
             if (m->joystick != joy) {
                 continue;
             }
-            const char *target;
-            if (m->kind == MAP_AXIS) {
-                if (m->code == ABS_X) {
-                    target = (m->direction < 0) ? "LEFT" : "RIGHT";
-                } else {
-                    target = (m->direction < 0) ? "UP" : "DOWN";
-                }
-            } else {
-                target = button_name(m->code);
-            }
+            const char *target = (m->kind == MAP_AXIS) ? axis_dir_name(m->code, m->direction)
+                                                       : button_name(m->code);
             fprintf(out, "%s%d %-12s %s\n", prefix, joy + 1, m->label, target);
         }
     }
@@ -265,6 +333,10 @@ static void print_usage(FILE *out, const char *prog) {
     fprintf(out, "  -m, --map <joystick>:<key>:<target>: add one mapping rule, also replacing\n");
     fprintf(out, "              the default mapping. May be given several times.\n");
     fprintf(out, "  --print-map: print the mapping that would be used and exit.\n");
+    fprintf(out, "  --node-file <file>: once every joystick exists, write one\n");
+    fprintf(out, "              '<joystick> /dev/input/eventN' line per joystick to <file>.\n");
+    fprintf(out, "              All pads share one device name (they impersonate the same\n");
+    fprintf(out, "              model), so this is how a script tells them apart.\n");
     fprintf(out, "  -h, --help: show this help and exit\n");
     fprintf(out, "\n");
     fprintf(out, "Mapping syntax (one rule per line in a -c file, or one -m rule with ':'\n");
@@ -275,10 +347,18 @@ static void print_usage(FILE *out, const char *prog) {
     fprintf(out, "                how many virtual joysticks are created.\n");
     fprintf(out, "    <key>:      key name, case-insensitive, with an optional KEY_ prefix\n");
     fprintf(out, "                (e.g. W, w, KEY_W, LEFTSHIFT, KP1, BACKSLASH, F1).\n");
-    fprintf(out, "    <target>:   UP, DOWN, LEFT or RIGHT for an axis direction, or a button\n");
-    fprintf(out, "                name (BTN_ prefix optional):");
+    fprintf(out, "    <target>:   an axis direction or a button name, case-insensitive.\n");
+    fprintf(out, "                Axis directions (left stick, right stick, d-pad, triggers):");
+    for (int i = 0; i < AXIS_DIR_NAME_COUNT; i++) {
+        fprintf(out, "%s%s", (i % 6 == 0) ? "\n                  " : " ", axis_dir_names[i].name);
+    }
+    fprintf(out, "\n                Buttons (BTN_ prefix optional):");
     for (int i = 0; i < BUTTON_COUNT; i++) {
         fprintf(out, "%s%s", (i % 6 == 0) ? "\n                  " : " ", button_names[i].name);
+    }
+    fprintf(out, "\n                Also accepted:");
+    for (int i = 0; i < BUTTON_ALIAS_COUNT; i++) {
+        fprintf(out, " %s", button_aliases[i].name);
     }
     fprintf(out, "\n");
     fprintf(out, "  Blank lines and lines starting with '#' are ignored.\n");
@@ -327,22 +407,26 @@ static int add_mapping(const char *joystick_field, const char *key_field, const 
     m->key = key;
     m->joystick = (int)joystick - 1;
 
-    if (equals_ignore_case(target_field, "UP") || equals_ignore_case(target_field, "DOWN") ||
-        equals_ignore_case(target_field, "LEFT") || equals_ignore_case(target_field, "RIGHT")) {
+    const struct axis_dir_name *dir = NULL;
+    for (int i = 0; i < AXIS_DIR_NAME_COUNT; i++) {
+        if (equals_ignore_case(axis_dir_names[i].name, target_field)) {
+            dir = &axis_dir_names[i];
+            break;
+        }
+    }
+
+    if (dir != NULL) {
         m->kind = MAP_AXIS;
-        m->code = (equals_ignore_case(target_field, "LEFT") ||
-                   equals_ignore_case(target_field, "RIGHT"))
-                      ? ABS_X
-                      : ABS_Y;
-        m->direction = (equals_ignore_case(target_field, "LEFT") ||
-                        equals_ignore_case(target_field, "UP"))
-                           ? -1
-                           : +1;
+        m->code = dir->axis;
+        m->direction = dir->dir;
     } else {
         int button = lookup_name(button_names, BUTTON_COUNT, target);
         if (button < 0) {
+            button = lookup_name(button_aliases, BUTTON_ALIAS_COUNT, target);
+        }
+        if (button < 0) {
             fprintf(stderr,
-                    "%s: unknown target '%s' (expected UP/DOWN/LEFT/RIGHT or a button name; "
+                    "%s: unknown target '%s' (expected an axis direction or a button name; "
                     "see --help)\n",
                     where, target_field);
             return -1;
@@ -479,16 +563,45 @@ static int emit(int fd, int type, int code, int value) {
     return 0;
 }
 
-/* Creates one virtual joystick with the same axes/buttons the mapping
- * table can drive. Returns the /dev/uinput fd, or -1 on failure. */
+/* Looks up the /dev/input/eventN node uinput created for fd, so the
+ * caller can be told which node a joystick ended up on. Two pads share
+ * the same device name, so the name alone cannot identify them. */
+static int joystick_node_path(int fd, char *out, size_t out_size) {
+    char sysname[64];
+    if (ioctl(fd, UI_GET_SYSNAME(sizeof(sysname)), sysname) < 0) {
+        return -1;
+    }
+
+    char dir_path[128];
+    snprintf(dir_path, sizeof(dir_path), "/sys/devices/virtual/input/%s", sysname);
+    DIR *dir = opendir(dir_path);
+    if (dir == NULL) {
+        return -1;
+    }
+
+    int found = -1;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strncmp(ent->d_name, "event", 5) == 0 && isdigit((unsigned char)ent->d_name[5]) &&
+            strlen(ent->d_name) < 32) {
+            snprintf(out, out_size, "/dev/input/%.31s", ent->d_name);
+            found = 0;
+            break;
+        }
+    }
+    closedir(dir);
+    return found;
+}
+
+/* Creates one virtual joystick that looks like a wired Xbox 360 pad:
+ * xpad's name, ids, buttons and axes. Returns the /dev/uinput fd, or -1
+ * on failure. */
 static int create_joystick(int index) {
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) {
         perror("open /dev/uinput");
         return -1;
     }
-
-    static const int axes[] = {ABS_X, ABS_Y};
 
     if (ioctl(fd, UI_SET_EVBIT, EV_KEY) < 0 || ioctl(fd, UI_SET_EVBIT, EV_ABS) < 0 ||
         ioctl(fd, UI_SET_EVBIT, EV_SYN) < 0) {
@@ -501,17 +614,18 @@ static int create_joystick(int index) {
             goto fail;
         }
     }
-    for (int i = 0; i < (int)(sizeof(axes) / sizeof(axes[0])); i++) {
-        if (ioctl(fd, UI_SET_ABSBIT, axes[i]) < 0) {
+    for (int i = 0; i < AXIS_COUNT; i++) {
+        if (ioctl(fd, UI_SET_ABSBIT, axes[i].code) < 0) {
             perror("UI_SET_ABSBIT");
             goto fail;
         }
         struct uinput_abs_setup abs_setup;
         memset(&abs_setup, 0, sizeof(abs_setup));
-        abs_setup.code = axes[i];
-        abs_setup.absinfo.minimum = -AXIS_MAX;
-        abs_setup.absinfo.maximum = AXIS_MAX;
-        abs_setup.absinfo.flat = AXIS_FLAT;
+        abs_setup.code = (__u16)axes[i].code;
+        abs_setup.absinfo.minimum = axes[i].min;
+        abs_setup.absinfo.maximum = axes[i].max;
+        abs_setup.absinfo.fuzz = axes[i].fuzz;
+        abs_setup.absinfo.flat = axes[i].flat;
         if (ioctl(fd, UI_ABS_SETUP, &abs_setup) < 0) {
             perror("UI_ABS_SETUP");
             goto fail;
@@ -520,11 +634,11 @@ static int create_joystick(int index) {
 
     struct uinput_setup usetup;
     memset(&usetup, 0, sizeof(usetup));
-    usetup.id.bustype = BUS_VIRTUAL;
-    usetup.id.vendor = 0x0000;
-    usetup.id.product = 0x0002;
-    usetup.id.version = 0x0100;
-    snprintf(usetup.name, sizeof(usetup.name), "Keyboard Joystick %d", index + 1);
+    usetup.id.bustype = BUS_USB;
+    usetup.id.vendor = XPAD_VENDOR;
+    usetup.id.product = XPAD_PRODUCT;
+    usetup.id.version = XPAD_VERSION;
+    snprintf(usetup.name, sizeof(usetup.name), "%s", XPAD_NAME);
 
     if (ioctl(fd, UI_DEV_SETUP, &usetup) < 0) {
         perror("UI_DEV_SETUP");
@@ -535,7 +649,12 @@ static int create_joystick(int index) {
         goto fail;
     }
 
-    fprintf(stderr, "Created virtual device \"%s\"\n", usetup.name);
+    char node[64] = "";
+    if (joystick_node_path(fd, node, sizeof(node)) == 0) {
+        snprintf(joystick_nodes[index], sizeof(joystick_nodes[index]), "%s", node);
+    }
+    fprintf(stderr, "Created virtual device \"%s\" for joystick %d%s%s\n", usetup.name, index + 1,
+            node[0] ? " on " : "", node);
     return fd;
 
 fail:
@@ -564,7 +683,7 @@ static void apply_mapping(struct joystick *joys, const struct key_mapping *m, in
         return;
     }
 
-    int axis = (m->code == ABS_X) ? AXIS_INDEX_X : AXIS_INDEX_Y;
+    int axis = m->code;
     int slot = (m->direction < 0) ? 0 : 1;
     joy->axis_keys[axis][slot] = pressed;
 
@@ -572,17 +691,17 @@ static void apply_mapping(struct joystick *joys, const struct key_mapping *m, in
      * cannot be pushed two ways at once. */
     int value = 0;
     if (joy->axis_keys[axis][1]) {
-        value += AXIS_MAX;
+        value += axes[axis].max;
     }
     if (joy->axis_keys[axis][0]) {
-        value -= AXIS_MAX;
+        value += axes[axis].min;
     }
 
     if (value == joy->axis_value[axis]) {
         return;
     }
     joy->axis_value[axis] = value;
-    if (emit(joy->fd, EV_ABS, m->code, value) == 0) {
+    if (emit(joy->fd, EV_ABS, axes[axis].code, value) == 0) {
         joy->dirty = 1;
     }
 }
@@ -604,6 +723,7 @@ static void use_default_mapping(void) {
 
 int main(int argc, char **argv) {
     const char *dev_path = NULL;
+    const char *node_file = NULL;
     int grab = 0;
     int print_map_only = 0;
 
@@ -645,6 +765,15 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--print-map") == 0) {
             print_map_only = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--node-file") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s requires an argument\n", argv[i]);
+                print_usage(stderr, argv[0]);
+                return 1;
+            }
+            node_file = argv[++i];
             continue;
         }
         if (strcmp(argv[i], "-g") == 0 || strcmp(argv[i], "--grab") == 0) {
@@ -704,6 +833,39 @@ int main(int argc, char **argv) {
     sa.sa_handler = handle_stop_signal;
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
+
+    if (node_file != NULL) {
+        /* Written to a temporary and renamed into place, so a reader
+         * polling for the file never sees a half-written list. */
+        char tmp_path[PATH_MAX];
+        if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", node_file) >= (int)sizeof(tmp_path)) {
+            fprintf(stderr, "%s: path too long\n", node_file);
+            rc = 1;
+            goto cleanup;
+        }
+        FILE *f = fopen(tmp_path, "w");
+        if (f == NULL) {
+            fprintf(stderr, "open %s: %s\n", tmp_path, strerror(errno));
+            rc = 1;
+            goto cleanup;
+        }
+        for (int i = 0; i < joystick_count; i++) {
+            if (joystick_nodes[i][0] == '\0') {
+                fprintf(stderr, "could not determine the event node of joystick %d\n", i + 1);
+                fclose(f);
+                unlink(tmp_path);
+                rc = 1;
+                goto cleanup;
+            }
+            fprintf(f, "%d %s\n", i + 1, joystick_nodes[i]);
+        }
+        if (fclose(f) != 0 || rename(tmp_path, node_file) < 0) {
+            fprintf(stderr, "write %s: %s\n", node_file, strerror(errno));
+            unlink(tmp_path);
+            rc = 1;
+            goto cleanup;
+        }
+    }
 
     fprintf(stderr, "Reading %s%s, key mapping:\n", dev_path, grab ? " (grabbed)" : "");
     print_mapping(stderr, mappings, mapping_count, joystick_count, "  ");
