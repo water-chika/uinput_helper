@@ -21,11 +21,12 @@
  * The built-in default mapping drives two joysticks:
  *   Joystick 1: W/A/S/D on the left stick, buttons in the T/F/G/H
  *               diamond, laid out like an Xbox pad's face buttons:
- *               T (Y / top), F (X / left), G (A / bottom), H (B / right)
+ *               T (Y / top), F (X / left), G (A / bottom), H (B / right),
+ *               with Q and R as the LB/RB shoulder buttons
  *   Joystick 2: arrow keys on the left stick, buttons in the
  *               Ins/Home/PgUp/ScLk/End cluster: ScrollLock (Y / top),
  *               Insert (X / left), End (A / bottom), PgUp (B / right),
- *               Home (START)
+ *               Home (START), with Del and PgDn as LB/RB
  *
  * It can be replaced entirely by a mapping file (-c) and/or individual
  * -m rules; see parse_mapping() for the syntax and --print-map to dump
@@ -135,6 +136,8 @@ static const struct key_mapping default_mappings[] = {
     {KEY_H, 0, MAP_BUTTON, BTN_B, 0, "H"},
     {KEY_F, 0, MAP_BUTTON, BTN_X, 0, "F"},
     {KEY_T, 0, MAP_BUTTON, BTN_Y, 0, "T"},
+    {KEY_Q, 0, MAP_BUTTON, BTN_TL, 0, "Q"},
+    {KEY_R, 0, MAP_BUTTON, BTN_TR, 0, "R"},
 
     /* Joystick 2 */
     {KEY_UP, 1, MAP_AXIS, 1, -1, "UP"},
@@ -146,6 +149,8 @@ static const struct key_mapping default_mappings[] = {
     {KEY_INSERT, 1, MAP_BUTTON, BTN_X, 0, "INSERT"},
     {KEY_SCROLLLOCK, 1, MAP_BUTTON, BTN_Y, 0, "SCROLLLOCK"},
     {KEY_HOME, 1, MAP_BUTTON, BTN_START, 0, "HOME"},
+    {KEY_DELETE, 1, MAP_BUTTON, BTN_TL, 0, "DELETE"},
+    {KEY_PAGEDOWN, 1, MAP_BUTTON, BTN_TR, 0, "PAGEDOWN"},
 };
 
 #define DEFAULT_MAPPING_COUNT ((int)(sizeof(default_mappings) / sizeof(default_mappings[0])))

@@ -62,12 +62,20 @@ The default mapping drives two joysticks:
 | `H` | `Page Up` | `BTN_B` (right) |
 | `F` | `Insert` | `BTN_X` (left) |
 | `T` | `Scroll Lock` | `BTN_Y` (top) |
+| `Q` | `Delete` | `BTN_TL` (LB) |
+| `R` | `Page Down` | `BTN_TR` (RB) |
 | — | `Home` | `BTN_START` |
 
 Both button sets are physical diamonds around the movement keys —
 `T`/`F`/`G`/`H` next to `WASD`, and `ScLk`/`Ins`/`PgUp`/`End` around
 `Home` next to the arrow keys — and each key sits where the Xbox button
-it produces sits on a real pad.
+it produces sits on a real pad. The shoulder buttons follow the same
+idea: `Q`/`R` flank `WASD`, and `Del`/`PgDn` sit under the second
+cluster, left key to LB and right key to RB.
+
+The analogue triggers (`LT`/`RT`), the right stick and the d-pad are
+exposed but unmapped by default; put them on whichever keys you like
+with a mapping file.
 
 Holding both directions of an axis cancels out (the axis returns to 0),
 key auto-repeat is ignored, and all changes belonging to one keyboard

@@ -28,7 +28,8 @@
 # effective one at any time with "keyboard_joystick --print-map".
 
 # joystick 1: WASD to move, T/F/G/H diamond laid out like the face
-# buttons of an Xbox pad (T on top is Y, F on the left is X)
+# buttons of an Xbox pad (T on top is Y, F on the left is X), with Q and
+# R as the LB/RB shoulder buttons
 1 W            UP
 1 S            DOWN
 1 A            LEFT
@@ -37,9 +38,12 @@
 1 H            B
 1 F            X
 1 T            Y
+1 Q            TL
+1 R            TR
 
 # joystick 2: arrow keys to move, Ins/Home/PgUp/ScLk/End cluster for the
-# buttons, in the same diamond around Home, which is the START button
+# buttons, in the same diamond around Home, which is the START button;
+# Del and PgDn below them are the LB/RB shoulder buttons
 2 UP           UP
 2 DOWN         DOWN
 2 LEFT         LEFT
@@ -49,3 +53,5 @@
 2 INSERT       X
 2 SCROLLLOCK   Y
 2 HOME         START
+2 DELETE       TL
+2 PAGEDOWN     TR
