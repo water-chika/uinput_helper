@@ -11,7 +11,8 @@
  * joystick can be driven from the keyboard.
  *
  * Default mapping:
- *   Joystick 1: W/A/S/D axes, buttons Q (A), E (B), R (X), U (Y)
+ *   Joystick 1: W/A/S/D axes, buttons in the T/F/G/H diamond:
+ *               G (A / south), H (B / east), T (X / north), F (Y / west)
  *   Joystick 2: arrow keys axes, buttons \ (A), Enter (B),
  *               Right Shift (X), Right Ctrl (Y)
  *
@@ -66,10 +67,10 @@ static const struct key_mapping key_mappings[] = {
     {KEY_S, 0, MAP_AXIS, ABS_Y, +1, "S"},
     {KEY_A, 0, MAP_AXIS, ABS_X, -1, "A"},
     {KEY_D, 0, MAP_AXIS, ABS_X, +1, "D"},
-    {KEY_Q, 0, MAP_BUTTON, BTN_A, 0, "Q"},
-    {KEY_E, 0, MAP_BUTTON, BTN_B, 0, "E"},
-    {KEY_R, 0, MAP_BUTTON, BTN_X, 0, "R"},
-    {KEY_U, 0, MAP_BUTTON, BTN_Y, 0, "U"},
+    {KEY_G, 0, MAP_BUTTON, BTN_A, 0, "G"},
+    {KEY_H, 0, MAP_BUTTON, BTN_B, 0, "H"},
+    {KEY_T, 0, MAP_BUTTON, BTN_X, 0, "T"},
+    {KEY_F, 0, MAP_BUTTON, BTN_Y, 0, "F"},
 
     /* Joystick 2 */
     {KEY_UP, 1, MAP_AXIS, ABS_Y, -1, "Up"},

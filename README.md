@@ -35,10 +35,10 @@ expose `ABS_X`/`ABS_Y` (range -512..512, `flat` 30, same as
 | --- | --- | --- |
 | `W` / `S` | `Up` / `Down` | `ABS_Y` -512 / +512 |
 | `A` / `D` | `Left` / `Right` | `ABS_X` -512 / +512 |
-| `Q` | `\` | `BTN_A` |
-| `E` | `Enter` | `BTN_B` |
-| `R` | `Right Shift` | `BTN_X` |
-| `U` | `Right Ctrl` | `BTN_Y` |
+| `G` | `\` | `BTN_A` (south) |
+| `H` | `Enter` | `BTN_B` (east) |
+| `T` | `Right Shift` | `BTN_X` (north) |
+| `F` | `Right Ctrl` | `BTN_Y` (west) |
 
 Holding both directions of an axis cancels out (the axis returns to 0),
 key auto-repeat is ignored, and all changes belonging to one keyboard
