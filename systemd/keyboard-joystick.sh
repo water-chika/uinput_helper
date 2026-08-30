@@ -62,7 +62,18 @@ cleanup() {
     rm -f "$node_file"
     wait 2>/dev/null
 }
-trap cleanup TERM INT EXIT
+
+# Being asked to stop is not a failure. Without an explicit exit here,
+# bash returns the status of whatever the signal interrupted (143 for
+# the sleep below), and systemd reports every "systemctl stop" as
+# "Failed with result 'exit-code'".
+on_signal() {
+    cleanup
+    exit 0
+}
+
+trap on_signal TERM INT
+trap cleanup EXIT
 
 grab_args=()
 if [ "${GRAB:-0}" = "1" ]; then
@@ -103,7 +114,8 @@ fi
 transfer_pid=$!
 
 # Exit as soon as either half dies, so the whole pair gets restarted
-# together instead of leaving a half-working setup behind.
-while kill -0 "$kj_pid" 2>/dev/null && kill -0 "$transfer_pid" 2>/dev/null; do
-    sleep 1
-done
+# together instead of leaving a half-working setup behind. "wait -n"
+# also lets a SIGTERM run the trap immediately, instead of first having
+# to finish an interrupted sleep (which is what used to leak a 143 exit
+# status into systemd).
+wait -n "$kj_pid" "$transfer_pid" 2>/dev/null
