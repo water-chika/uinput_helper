@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=/etc/default/input-transfer-send
 ExecStart=/usr/local/bin/input-transfer-send.sh
-Restart=on-failure
+Restart=always
 RestartSec=2
 
 # Hardening (DeviceAllow can't reference the devices config file's

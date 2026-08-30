@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=/etc/default/input-transfer-receive
 ExecStart=/usr/local/bin/input_transfer receive --listen ${LISTEN_PORT}
-Restart=on-failure
+Restart=always
 RestartSec=2
 
 # Hardening
