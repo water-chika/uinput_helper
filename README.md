@@ -8,6 +8,46 @@ Interactively creates a virtual joystick device via `/dev/uinput` and lets
 you drive its axes/buttons from stdin (`x <value>`, `y <value>`,
 `a <0|1>`, `b <0|1>`).
 
+## Emulating two joysticks with a keyboard
+
+`keyboard_joystick` reads a real keyboard's evdev node and turns its key
+presses into **two** independent virtual joysticks created via
+`/dev/uinput`, so two players can share one keyboard, or a game that only
+speaks joystick can be driven from the keyboard.
+
+```sh
+keyboard_joystick -d <keyboard-device> [--grab]
+```
+
+- `-d, --device <dev>`: the keyboard's event node (e.g.
+  `/dev/input/event3`; find it with `input_dump` or
+  `/proc/bus/input/devices`).
+- `-g, --grab`: grab the keyboard exclusively (`EVIOCGRAB`), so its keys
+  stop reaching the desktop while this runs. Off by default, i.e. keys
+  keep working normally and are only mirrored onto the joysticks.
+- `-h, --help`: show the usage and the full key mapping.
+
+Both virtual devices ("Keyboard Joystick 1" and "Keyboard Joystick 2")
+expose `ABS_X`/`ABS_Y` (range -512..512, `flat` 30, same as
+`uinput_test`) and `BTN_A`/`BTN_B`/`BTN_X`/`BTN_Y`.
+
+| Key (joystick 1) | Key (joystick 2) | Effect |
+| --- | --- | --- |
+| `W` / `S` | `Up` / `Down` | `ABS_Y` -512 / +512 |
+| `A` / `D` | `Left` / `Right` | `ABS_X` -512 / +512 |
+| `Q` | `\` | `BTN_A` |
+| `E` | `Enter` | `BTN_B` |
+| `R` | `Right Shift` | `BTN_X` |
+| `U` | `Right Ctrl` | `BTN_Y` |
+
+Holding both directions of an axis cancels out (the axis returns to 0),
+key auto-repeat is ignored, and all changes belonging to one keyboard
+report are emitted before a single `SYN_REPORT`. `SIGINT`/`SIGTERM`
+destroy the virtual devices and release the grab cleanly.
+
+Needs read access to the keyboard's event node and to `/dev/uinput`
+(i.e. root, or suitable udev permissions).
+
 ## Transferring input devices over the network
 
 `input_transfer` lets you take one or more real input devices (mouse,
@@ -188,6 +228,46 @@ connecting receiver instead, set `LISTEN=1` (and optionally
 `LISTEN_PORT`) in `/etc/default/input-transfer-send` and point
 `input-transfer-receive.service`'s peer at it via `input_transfer
 receive <host> [port]` on the other machine.
+
+`input-transfer-receive@.service` is a templated variant that takes the
+listen port from the instance name, for running several independent
+receivers side by side (each restartable on its own):
+
+```sh
+install -m644 systemd/input-transfer-receive@.service /etc/systemd/system/
+systemctl enable --now input-transfer-receive@9112.service   # listens on 9112
+```
+
+### Playing a two-player game across machines
+
+`systemd/keyboard-joystick.{service,env,sh}` combine
+`keyboard_joystick` and `input_transfer send` into one service: it
+turns a local keyboard into the two virtual joysticks, waits for both
+to appear, and forwards them to the machine running the game. If either
+half dies the wrapper exits so systemd restarts the pair together.
+
+On the machine with the keyboard:
+
+```sh
+install -m755 build/keyboard_joystick /usr/local/bin/keyboard_joystick
+install -m755 systemd/keyboard-joystick.sh /usr/local/bin/keyboard-joystick.sh
+install -m644 systemd/keyboard-joystick.service /etc/systemd/system/
+install -m600 systemd/keyboard-joystick.env /etc/default/keyboard-joystick
+$EDITOR /etc/default/keyboard-joystick   # KEYBOARD_DEVICE, GRAB, REMOTE_HOST/REMOTE_PORT
+systemctl daemon-reload
+systemctl enable --now keyboard-joystick.service
+```
+
+On the machine running the game, run a receiver on the matching port
+(`input-transfer-receive@9112.service` above). Use a port of its own if
+another `input_transfer` pair (e.g. a forwarded mouse) already uses
+9111, so restarting the joysticks doesn't disturb it.
+
+Point `KEYBOARD_DEVICE` at a `/dev/input/by-id/...-event-kbd` path
+rather than `/dev/input/eventN`, which can change across reboots.
+**`GRAB=1` takes that keyboard away from its own machine's desktop**, so
+make sure it isn't the only keyboard you can type on there (or that you
+can reach the machine over SSH to `systemctl stop keyboard-joystick`).
 
 ## Inspecting a device's events
 

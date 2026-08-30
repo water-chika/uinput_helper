@@ -1,0 +1,21 @@
+[Unit]
+Description=Emulate two joysticks from a keyboard and forward them via input_transfer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/keyboard-joystick
+ExecStart=/usr/local/bin/keyboard-joystick.sh
+Restart=on-failure
+RestartSec=2
+
+# Hardening (device access is left open: the virtual joystick nodes are
+# created at runtime, so their paths can't be listed in DeviceAllow=)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

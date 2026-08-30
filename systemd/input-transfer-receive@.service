@@ -1,0 +1,21 @@
+[Unit]
+Description=Receive input device(s) via input_transfer (listening on port %i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Optional per-port environment, e.g. INPUT_TRANSFER_LOG_LEVEL.
+EnvironmentFile=-/etc/default/input-transfer-receive@%i
+ExecStart=/usr/local/bin/input_transfer receive --listen %i
+Restart=on-failure
+RestartSec=2
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
