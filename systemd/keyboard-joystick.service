@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=/etc/default/keyboard-joystick
 ExecStart=/usr/local/bin/keyboard-joystick.sh
-Restart=on-failure
+Restart=always
 RestartSec=2
 
 # Hardening (device access is left open: the virtual joystick nodes are
